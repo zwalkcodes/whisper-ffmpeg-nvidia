@@ -77,6 +77,3 @@ The project includes GitHub Actions workflow for:
 4. Push to the branch
 5. Create a Pull Request
 
-## License
-
-[MIT License](LICENSE)
