@@ -33,7 +33,7 @@ def upload_to_s3(local_path, s3_path):
     s3.upload_file(local_path, bucket, key)
 
 def send_status_event(task_arn, file_name, status, progress=None):
-    events = boto3.client('events')
+    events = boto3.client('events', region_name=os.environ['AWS_REGION'])
     
     event = {
         'version': '0',
@@ -69,6 +69,7 @@ def get_video_metadata(input_path):
     ]
     result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     metadata = json.loads(result.stdout)
+    print("Available metadata:", json.dumps(metadata, indent=2))
     return metadata['streams'][0]
 
 def transcribe_audio(local_file_path, output_file):
@@ -115,13 +116,21 @@ def process_video():
     
     # Get video metadata
     metadata = get_video_metadata(local_input)
-    width = metadata['width']
-    height = metadata['height']
-    aspect_ratio = metadata['display_aspect_ratio']
 
-    # Check if the video is 16:9
-    if aspect_ratio != '16:9':
-        raise ValueError("Input video is not in 16:9 aspect ratio")
+    # Debug metadata
+    print("Available metadata:", json.dumps(metadata, indent=2))
+    
+    # Calculate aspect ratio
+    width = int(metadata["width"])
+    height = int(metadata["height"])
+    actual_ratio = width / height
+    target_ratio = 16 / 9
+    
+    # Allow small floating point differences
+    if abs(actual_ratio - target_ratio) > 0.01:
+        raise ValueError(f"Input video is not in 16:9 aspect ratio. Got {actual_ratio:.3f}, expected {target_ratio:.3f}")
+    
+    print(f"Aspect ratio check passed: {width}x{height} = {actual_ratio:.3f} ≈ 16:9")
 
     # Create temporary working directory
     work_dir = f"/tmp/{base_name}"
