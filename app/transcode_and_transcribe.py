@@ -11,7 +11,7 @@ s3_client = boto3.client('s3')
 
 # Set up logging
 logging.basicConfig(
-    filename='/home/ubuntu/whisper_transcription.log',
+    filename='/app/whisper_transcription.log',
     level=logging.DEBUG,
     format='%(asctime)s %(levelname)s: %(message)s'
 )
@@ -89,12 +89,18 @@ def transcribe_audio(local_file_path, output_file):
         raise
 
 def process_video():
-    input_path = os.environ['INPUT_FILE']
-    output_path = os.environ['OUTPUT_PATH']
+    # Get environment variables
+    bucket_name = os.environ['S3_BUCKET']  # Will be passed from ECS task
+    input_key = os.environ['INPUT_KEY']    # From SQS/Lambda
+    
+    # Define paths within the bucket
+    input_path = f"s3://{bucket_name}/uploads/{input_key}"
+    base_name = os.path.splitext(os.path.basename(input_key))[0]
+    transcoding_path = f"s3://{bucket_name}/transcoding_samples/{base_name}/"
+    transcription_path = f"s3://{bucket_name}/transcriptions/{base_name}.json"
+    
     task_arn = os.environ['ECS_CONTAINER_METADATA_URI_V4'].split('/')[-2]
     
-    # Derive base_name from input_path
-    base_name = os.path.splitext(os.path.basename(input_path))[0]
     local_input = download_from_s3(input_path)
     
     # Define progress steps
@@ -133,6 +139,9 @@ def process_video():
         # Transcribe the audio file
         transcription_output = f"{work_dir}/{base_name}.json"
         transcribe_audio(audio_output, transcription_output)
+
+        # Upload transcription to S3
+        upload_to_s3(transcription_output, transcription_path)
 
         # Send status event: Audio processing completed
         send_status_event(task_arn, base_name, 'AUDIO_PROCESSING_COMPLETED', progress_steps['AUDIO_PROCESSING_COMPLETED'])
@@ -256,7 +265,7 @@ def process_video():
         for root, _, files in os.walk(work_dir):
             for file in files:
                 local_file = os.path.join(root, file)
-                s3_key = f"{output_path}{base_name}/{file}"
+                s3_key = f"{transcoding_path}{file}"
                 upload_to_s3(local_file, s3_key)
 
         # Send status event: Upload completed
