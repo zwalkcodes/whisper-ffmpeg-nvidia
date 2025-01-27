@@ -76,7 +76,7 @@ def transcribe_audio(local_file_path, output_file):
     """Use Whisper to transcribe the audio file."""
     try:
         logging.info(f"Loading Whisper model and starting transcription for {local_file_path}")
-        model = whisper.load_model("large")
+        model = whisper.load_model("large", weights_only=True).to("cuda")
 
         # Add word_timestamps=True to get word-level timestamps in the result
         result = model.transcribe(local_file_path, word_timestamps=True)
@@ -160,40 +160,40 @@ def process_video():
             {
                 "name": "UHD",
                 "size": "3840x2160",
-                "video_codec": "libx265",
-                "video_opts": "-preset slow -crf 23 -x265-params vbv-maxrate=12000:vbv-bufsize=24000",
+                "video_codec": "hevc_nvenc",
+                "video_opts": "-preset p7 -rc vbr -cq 23 -b:v 12M -maxrate 12M -bufsize 24M",
                 "bitrate": "12000k",
                 "audio_opts": "-c:a aac -b:a 192k"
             },
             {
                 "name": "1080P-H265",
                 "size": "1920x1080",
-                "video_codec": "libx265",
-                "video_opts": "-preset slow -crf 23 -x265-params vbv-maxrate=6000:vbv-bufsize=12000",
+                "video_codec": "hevc_nvenc",
+                "video_opts": "-preset p7 -rc vbr -cq 23 -b:v 6M -maxrate 6M -bufsize 12M",
                 "bitrate": "6000k",
                 "audio_opts": "-c:a aac -b:a 192k"
             },
             {
                 "name": "1080P-H264",
                 "size": "1920x1080",
-                "video_codec": "libx264",
-                "video_opts": "-preset slow -crf 23 -maxrate 6000k -bufsize 12000k",
+                "video_codec": "h264_nvenc",
+                "video_opts": "-preset p7 -rc vbr -cq 23 -b:v 6M -maxrate 6M -bufsize 12M",
                 "bitrate": "6000k",
                 "audio_opts": "-c:a aac -b:a 192k"
             },
             {
                 "name": "720P-H264",
                 "size": "1280x720",
-                "video_codec": "libx264",
-                "video_opts": "-preset slow -crf 23 -maxrate 4000k -bufsize 8000k",
+                "video_codec": "h264_nvenc",
+                "video_opts": "-preset p7 -rc vbr -cq 23 -b:v 4M -maxrate 4M -bufsize 8M",
                 "bitrate": "4000k",
                 "audio_opts": "-c:a aac -b:a 192k"
             },
             {
                 "name": "540P-H264",
                 "size": "960x540",
-                "video_codec": "libx264",
-                "video_opts": "-preset slow -crf 23 -maxrate 2500k -bufsize 5000k",
+                "video_codec": "h264_nvenc",
+                "video_opts": "-preset p7 -rc vbr -cq 23 -b:v 2M -maxrate 2M -bufsize 4M",
                 "bitrate": "2500k",
                 "audio_opts": "-c:a aac -b:a 192k"
             }
