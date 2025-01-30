@@ -13,10 +13,12 @@ import requests
 s3_client = boto3.client('s3')
 ec2 = boto3.client('ec2')
 sqs = boto3.client('sqs')
+dynamodb = boto3.client('dynamodb')
 
 INSTANCE_ID = requests.get('http://169.254.169.254/latest/meta-data/instance-id').text
 
 QUEUE_URL = os.environ.get("SQS_QUEUE_URL")
+VIDEO_TABLE = os.environ.get('VIDEO_TABLE_NAME')
 
 # Set up logging to both file and console
 logging.basicConfig(
@@ -43,130 +45,57 @@ def set_termination_protection(enabled):
     except Exception as e:
         logging.error(f"Failed to set termination protection: {e}")
 
-def check_queue_status():
-    """
-    Check queue attributes including in-flight messages.
-    """
-    try:
-        response = sqs.get_queue_attributes(
-            QueueUrl=QUEUE_URL,
-            AttributeNames=[
-                'ApproximateNumberOfMessages',
-                'ApproximateNumberOfMessagesNotVisible'
-            ]
-        )
-        visible = int(response['Attributes']['ApproximateNumberOfMessages'])
-        in_flight = int(response['Attributes']['ApproximateNumberOfMessagesNotVisible'])
-        
-        logging.info(f"Queue status: {visible} visible messages, {in_flight} in-flight messages")
-        return visible, in_flight
-    except Exception as e:
-        logging.error(f"Failed to get queue attributes: {e}")
-        return 0, 0
-
-def extend_message_visibility(receipt_handle, timeout):
-    """
-    Extend the visibility timeout for a message being processed.
-    """
-    try:
-        sqs.change_message_visibility(
-            QueueUrl=QUEUE_URL,
-            ReceiptHandle=receipt_handle,
-            VisibilityTimeout=timeout
-        )
-        logging.info(f"Extended message visibility timeout to {timeout} seconds")
-    except Exception as e:
-        logging.error(f"Failed to extend message visibility: {e}")
-
 def poll_queue():
     """
-    Poll messages from SQS, process, and delete them.
+    Poll messages from SQS. If no messages are found after a few attempts, shut down.
     """
-    empty_queue_count = 0
     max_empty_attempts = 3
-    stale_message_count = 0
-    max_stale_attempts = 5  # Number of times to check for stale messages
+    wait_time = 20  # seconds to wait for each poll
+    visibility_timeout = 1800  # 30min - should be longer than max processing time
 
-    while True:
-        visible, in_flight = check_queue_status()
+    for attempt in range(max_empty_attempts):
+        logging.info(f"Polling attempt {attempt + 1}/{max_empty_attempts}")
         
-        if in_flight > 0:
-            stale_message_count += 1
-            logging.info(f"Messages are still being processed. Attempt {stale_message_count}/{max_stale_attempts}")
-            
-            if stale_message_count >= max_stale_attempts:
-                logging.warning("Max stale attempts reached. Will try to receive new messages.")
-                stale_message_count = 0
-            else:
-                time.sleep(30)
-                continue
-
-        logging.info("Polling for messages...")
+        # Try to get a message with visibility timeout
         response = sqs.receive_message(
             QueueUrl=QUEUE_URL,
             MaxNumberOfMessages=1,
-            WaitTimeSeconds=20,
-            VisibilityTimeout=3600,
+            WaitTimeSeconds=wait_time,
+            VisibilityTimeout=visibility_timeout,  # Message will be invisible to other consumers
             AttributeNames=['All']
         )
 
         if 'Messages' in response:
-            empty_queue_count = 0
-            for message in response['Messages']:
-                try:
-                    logging.info(f"Processing message: {message['MessageId']}")
-                    set_termination_protection(True)
-                    
-                    # Start a background thread to extend visibility timeout periodically
-                    def extend_visibility():
-                        while True:
-                            time.sleep(1800)  # Extend every 30 minutes
-                            extend_message_visibility(message['ReceiptHandle'], 3600)
-                    
-                    import threading
-                    visibility_thread = threading.Thread(target=extend_visibility)
-                    visibility_thread.daemon = True
-                    visibility_thread.start()
-
-                    # Process the message
-                    process_message(message['Body'])
-
-                    # Delete the message after successful processing
-                    sqs.delete_message(
-                        QueueUrl=QUEUE_URL,
-                        ReceiptHandle=message['ReceiptHandle']
-                    )
-                    logging.info(f"Successfully processed and deleted message: {message['MessageId']}")
-                    set_termination_protection(False)
-                except Exception as e:
-                    logging.error(f"Error processing message: {e}")
-                    set_termination_protection(False)
-                    # Don't delete the message - it will become visible again after timeout
-        else:
-            empty_queue_count += 1
-            logging.info(f"No messages found. Empty queue count: {empty_queue_count}/{max_empty_attempts}")
-            
-            if empty_queue_count >= max_empty_attempts:
-                logging.info(f"Queue has been empty for {max_empty_attempts} consecutive polls. Preparing for shutdown...")
-                time.sleep(60)  # Wait one more minute to be sure
+            message = response['Messages'][0]
+            try:
+                logging.info(f"Processing message: {message['MessageId']}")
+                set_termination_protection(True)
                 
-                # Double-check for new messages before shutting down
-                final_check = sqs.receive_message(
+                # Process the message
+                process_message(message['Body'])
+
+                # Delete the message after successful processing
+                sqs.delete_message(
                     QueueUrl=QUEUE_URL,
-                    MaxNumberOfMessages=1,
-                    WaitTimeSeconds=10
+                    ReceiptHandle=message['ReceiptHandle']
                 )
+                logging.info(f"Successfully processed and deleted message: {message['MessageId']}")
+                set_termination_protection(False)
                 
-                if 'Messages' not in final_check:
-                    logging.info("Final check confirmed queue is empty. Initiating shutdown...")
-                    break
-                else:
-                    logging.info("Found new messages during final check. Continuing to process...")
-                    empty_queue_count = 0
-                    continue
-            
-            time.sleep(30)  # Wait between polls when queue is empty
+                # Continue polling for more messages
+                continue
+                
+            except Exception as e:
+                logging.error(f"Error processing message: {e}")
+                set_termination_protection(False)
+                # Message will become visible again after visibility timeout
+                raise
+        else:
+            logging.info(f"No messages found (attempt {attempt + 1}/{max_empty_attempts})")
+            if attempt < max_empty_attempts - 1:
+                logging.info(f"Waiting {wait_time} seconds before next attempt...")
 
+    logging.info("No more messages to process. Shutting down...")
     shutdown_instance()
 
 def shutdown_instance():
@@ -180,47 +109,15 @@ def shutdown_instance():
     except Exception as e:
         logging.error(f"Failed to terminate instance: {e}")
 
-def is_message_being_processed(message_id):
-    """
-    Check if a message is currently being processed by checking for a marker file.
-    """
-    marker_file = f"/tmp/processing_{message_id}"
-    return os.path.exists(marker_file)
-
-def mark_message_processing(message_id, processing=True):
-    """
-    Create or remove a marker file to indicate message processing status.
-    """
-    marker_file = f"/tmp/processing_{message_id}"
-    if processing:
-        with open(marker_file, 'w') as f:
-            f.write(str(time.time()))
-    else:
-        if os.path.exists(marker_file):
-            os.remove(marker_file)
-
 def process_message(message_body):
     """
     Process the message and call process_video with extracted parameters.
     """
     try:
         message_data = json.loads(message_body)
-        message_id = message_data.get('MessageId', str(time.time()))
-        
-        if is_message_being_processed(message_id):
-            logging.warning(f"Message {message_id} appears to be already processing. Skipping.")
-            return
-            
-        mark_message_processing(message_id, True)
+           
         try:
-            # Extract AWS account ID from SQS queue URL
-            if 'AWS_ACCOUNT_ID' not in message_data:
-                queue_parts = QUEUE_URL.split('/')
-                if len(queue_parts) >= 4:
-                    message_data['AWS_ACCOUNT_ID'] = queue_parts[3]
-                    logging.info(f"Extracted AWS_ACCOUNT_ID from queue URL: {message_data['AWS_ACCOUNT_ID']}")
-            
-            required_fields = ['S3_BUCKET', 'INPUT_KEY', 'AWS_REGION']
+            required_fields = ['S3_BUCKET', 'INPUT_KEY']
             
             # Validate required fields
             for field in required_fields:
@@ -230,16 +127,10 @@ def process_message(message_body):
             process_video(
                 message_data['S3_BUCKET'],
                 message_data['INPUT_KEY'],
-                message_data['AWS_REGION'],
-                message_data.get('AWS_ACCOUNT_ID', ''),  # Make account ID optional
-                QUEUE_URL  # Pass the queue URL
-            )
-        finally:
-            mark_message_processing(message_id, False)
-            
-    except json.JSONDecodeError as e:
-        logging.error(f"Failed to decode message body: {e}")
-        raise
+            )     
+        except json.JSONDecodeError as e:
+            logging.error(f"Failed to decode message body: {e}")
+            raise
     except Exception as e:
         logging.error(f"Error processing message: {e}")
         raise
@@ -338,23 +229,21 @@ def get_frame_rate(input_file):
     
     return frame_rate
 
-def process_video(s3_bucket, input_key, aws_region, aws_account_id, sqs_queue_url):
+def process_video(s3_bucket, input_key):
     """
     Process the video using the provided parameters.
     """
     # Use the parameters as needed in your process_video logic
     logging.info(f"Starting video processing for bucket: {s3_bucket}, key: {input_key}")
-    
+
     # Define paths within the bucket
     input_path = f"s3://{s3_bucket}/uploads/{input_key}"
     base_name = os.path.splitext(os.path.basename(input_key))[0]
     transcoding_path = f"s3://{s3_bucket}/transcoding_samples/"
     transcription_path = f"s3://{s3_bucket}/transcriptions/{base_name}.json"
     
-    task_arn = os.environ['ECS_CONTAINER_METADATA_URI_V4'].split('/')[-2]
-    
-    local_input = download_from_s3(input_path)
-    
+    update_progress(base_name, 0)  # Starting progress
+   
     # Define progress steps
     progress_steps = {
         'DOWNLOAD_COMPLETED': 10,
@@ -364,6 +253,10 @@ def process_video(s3_bucket, input_key, aws_region, aws_account_id, sqs_queue_ur
         'DASH_MANIFEST_CREATION_COMPLETED': 90,
         'UPLOAD_COMPLETED': 100
     }
+
+    local_input = download_from_s3(input_path)
+    update_progress(base_name, progress_steps['DOWNLOAD_COMPLETED'])
+
     
     # Get video metadata
     metadata = get_video_metadata(local_input)
@@ -388,9 +281,6 @@ def process_video(s3_bucket, input_key, aws_region, aws_account_id, sqs_queue_ur
     os.makedirs(work_dir, exist_ok=True)
     
     try:
-        # Send status event: Download completed
-        send_status_event(task_arn, base_name, 'DOWNLOAD_COMPLETED', aws_region, aws_account_id, progress_steps['DOWNLOAD_COMPLETED'])
-
         # Process audio separately (high quality)
         audio_output = f"{work_dir}/{base_name}-WAV.mp4"
 
@@ -428,8 +318,7 @@ def process_video(s3_bucket, input_key, aws_region, aws_account_id, sqs_queue_ur
             logging.error("S3 upload failed: %s", e)
             raise e
      
-        # Send status event: Audio processing completed
-        send_status_event(task_arn, base_name, 'AUDIO_PROCESSING_COMPLETED', aws_region, aws_account_id, progress_steps['AUDIO_PROCESSING_COMPLETED'])
+        update_progress(base_name, progress_steps['AUDIO_PROCESSING_COMPLETED'])
         
         # Define video variants
         variants = [
@@ -507,9 +396,6 @@ def process_video(s3_bucket, input_key, aws_region, aws_account_id, sqs_queue_ur
             )
             subprocess.run(cmd, shell=True, check=True)
 
-        # Send status event: Video processing completed
-        send_status_event(task_arn, base_name, 'VIDEO_PROCESSING_COMPLETED', aws_region, aws_account_id, progress_steps['VIDEO_PROCESSING_COMPLETED'])
-
         # Create the master playlist
         master_playlist_file = f"{work_dir}/{base_name}.m3u8"
         with open(master_playlist_file, 'w') as f:
@@ -531,7 +417,7 @@ def process_video(s3_bucket, input_key, aws_region, aws_account_id, sqs_queue_ur
                 f.write(f'{variant_playlist_m3u8}\n')
 
         # Send status event: Playlist creation completed
-        send_status_event(task_arn, base_name, 'PLAYLIST_CREATION_COMPLETED', aws_region, aws_account_id, progress_steps['PLAYLIST_CREATION_COMPLETED'])
+        update_progress(base_name, progress_steps['PLAYLIST_CREATION_COMPLETED'])
    
         # Upload all segments and manifests to S3
         for root, _, files in os.walk(work_dir):
@@ -541,19 +427,40 @@ def process_video(s3_bucket, input_key, aws_region, aws_account_id, sqs_queue_ur
                 upload_to_s3(local_file, s3_key)
 
         # Send status event: Upload completed
-        send_status_event(task_arn, base_name, 'UPLOAD_COMPLETED', aws_region, aws_account_id, progress_steps['UPLOAD_COMPLETED'])
+        update_progress(base_name, progress_steps['UPLOAD_COMPLETED'])
 
         # Clean up
         # subprocess.run(f'rm -rf {work_dir}', shell=True)
         # os.remove(local_input)
         
         # Send success event
-        send_status_event(task_arn, base_name, 'COMPLETED', aws_region, aws_account_id, 100)
+        update_progress(base_name, 100)
         
     except Exception as e:
         # Send failure event
-        send_status_event(task_arn, base_name, 'FAILED', aws_region, aws_account_id, 0)
-        raise e
+        update_progress(base_name, 0)
+        logging.error(f"Failed to process video {base_name}: {e}")
+        raise
+
+def update_progress(video_id, percent_complete):
+    """
+    Update video processing progress in DynamoDB.
+    """
+    try:
+        dynamodb.update_item(
+            TableName=VIDEO_TABLE,
+            Key={
+                'FileName': {'S': video_id}
+            },
+            UpdateExpression="SET progress = :progress, updatedAt = :time",
+            ExpressionAttributeValues={
+                ':progress': {'N': str(percent_complete)},
+                ':time': {'S': datetime.utcnow().isoformat()}
+            }
+        )
+        logging.info(f"Updated progress for {video_id}: {percent_complete}%")
+    except Exception as e:
+        logging.error(f"Failed to update progress: {e}")
 
 if __name__ == "__main__":
     poll_queue()
