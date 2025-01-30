@@ -61,12 +61,13 @@ def poll_queue():
             QueueUrl=QUEUE_URL,
             MaxNumberOfMessages=1,
             WaitTimeSeconds=wait_time,
-            VisibilityTimeout=visibility_timeout,  # Message will be invisible to other consumers
+            VisibilityTimeout=visibility_timeout,
             AttributeNames=['All']
         )
 
         if 'Messages' in response:
             message = response['Messages'][0]
+            receipt_handle = message['ReceiptHandle']
             try:
                 logging.info(f"Processing message: {message['MessageId']}")
                 set_termination_protection(True)
@@ -74,10 +75,10 @@ def poll_queue():
                 # Process the message
                 process_message(message['Body'])
 
-                # Delete the message after successful processing
+                # Delete the message only after successful processing
                 sqs.delete_message(
                     QueueUrl=QUEUE_URL,
-                    ReceiptHandle=message['ReceiptHandle']
+                    ReceiptHandle=receipt_handle
                 )
                 logging.info(f"Successfully processed and deleted message: {message['MessageId']}")
                 set_termination_protection(False)
@@ -88,7 +89,18 @@ def poll_queue():
             except Exception as e:
                 logging.error(f"Error processing message: {e}")
                 set_termination_protection(False)
-                # Message will become visible again after visibility timeout
+                
+                # Delete the message even if processing failed
+                # This prevents infinite retry loops
+                try:
+                    sqs.delete_message(
+                        QueueUrl=QUEUE_URL,
+                        ReceiptHandle=receipt_handle
+                    )
+                    logging.info(f"Deleted failed message: {message['MessageId']}")
+                except Exception as delete_error:
+                    logging.error(f"Failed to delete message: {delete_error}")
+                
                 raise
         else:
             logging.info(f"No messages found (attempt {attempt + 1}/{max_empty_attempts})")
