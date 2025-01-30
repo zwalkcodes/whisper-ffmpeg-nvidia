@@ -26,13 +26,14 @@ logging.basicConfig(
     format='%(asctime)s %(levelname)s: %(message)s'
 )
 
+autoscaling = boto3.client('autoscaling')
 
 def set_instance_protection(enabled):
     """
     Sets scale-in protection for this EC2 instance.
     """
     try:
-        ec2.set_instance_protection(
+        autoscaling.set_instance_protection(
             InstanceIds=[INSTANCE_ID],
             AutoScalingGroupName=ASG_NAME,
             ProtectedFromScaleIn=enabled
@@ -46,26 +47,26 @@ def process_message(message_body):
     Process the message and call process_video with extracted parameters.
     """
     try:
-        # Parse the JSON message body
         message_data = json.loads(message_body)
+        required_fields = ['S3_BUCKET', 'INPUT_KEY', 'AWS_REGION', 'AWS_ACCOUNT_ID']
         
-        # Extract necessary fields
-        s3_bucket = message_data.get('S3_BUCKET')
-        input_key = message_data.get('INPUT_KEY')
-        aws_region = message_data.get('AWS_REGION')
-        aws_account_id = message_data.get('AWS_ACCOUNT_ID')
-        sqs_queue_url = message_data.get('SQS_QUEUE_URL')
-
-        logging.info(f"Processing message: {message_data}")
-
-        # Call process_video with extracted parameters
-        process_video(s3_bucket, input_key, aws_region, aws_account_id, sqs_queue_url)
-
-        logging.info("Processing complete.")
+        # Validate required fields
+        for field in required_fields:
+            if field not in message_data:
+                raise ValueError(f"Missing required field: {field}")
+        
+        process_video(
+            message_data['S3_BUCKET'],
+            message_data['INPUT_KEY'],
+            message_data['AWS_REGION'],
+            message_data['AWS_ACCOUNT_ID']
+        )
     except json.JSONDecodeError as e:
         logging.error(f"Failed to decode message body: {e}")
+        raise
     except Exception as e:
         logging.error(f"Error processing message: {e}")
+        raise
 
 def poll_queue():
     """
