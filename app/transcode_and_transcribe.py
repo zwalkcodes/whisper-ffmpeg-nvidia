@@ -5,10 +5,14 @@ import json
 from datetime import datetime
 import whisper
 import logging
-import re
+import time
 
 # Initialize S3 client
 s3_client = boto3.client('s3')
+
+# Initialize SQS client
+sqs = boto3.client('sqs')
+QUEUE_URL = os.environ.get("SQS_QUEUE_URL")
 
 # Set up logging
 logging.basicConfig(
@@ -16,6 +20,74 @@ logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s %(levelname)s: %(message)s'
 )
+
+def process_message(message_body):
+    """
+    Process the message and call process_video with extracted parameters.
+    """
+    try:
+        # Parse the JSON message body
+        message_data = json.loads(message_body)
+        
+        # Extract necessary fields
+        s3_bucket = message_data.get('S3_BUCKET')
+        input_key = message_data.get('INPUT_KEY')
+        aws_region = message_data.get('AWS_REGION')
+        aws_account_id = message_data.get('AWS_ACCOUNT_ID')
+        sqs_queue_url = message_data.get('SQS_QUEUE_URL')
+
+        logging.info(f"Processing message: {message_data}")
+
+        # Call process_video with extracted parameters
+        process_video(s3_bucket, input_key, aws_region, aws_account_id, sqs_queue_url)
+
+        logging.info("Processing complete.")
+    except json.JSONDecodeError as e:
+        logging.error(f"Failed to decode message body: {e}")
+    except Exception as e:
+        logging.error(f"Error processing message: {e}")
+
+def poll_queue():
+    """
+    Poll messages from SQS, process, and delete them.
+    """
+    while True:
+        response = sqs.receive_message(
+            QueueUrl=QUEUE_URL,
+            MaxNumberOfMessages=1,
+            WaitTimeSeconds=10,  # Long polling
+            VisibilityTimeout=3600
+        )
+
+        if 'Messages' in response:
+            for message in response['Messages']:
+                try:
+                    process_message(message['Body'])  # Process the message
+
+                    # Only delete the message if processing was successful
+                    sqs.delete_message(
+                        QueueUrl=QUEUE_URL,
+                        ReceiptHandle=message['ReceiptHandle']
+                    )
+                    logging.info(f"Deleted message: {message['MessageId']}")
+
+                except Exception as e:
+                    logging.error(f"Error processing message: {e}")
+                    # Do NOT delete the message if an error occurs
+        else:
+            logging.info("No messages left in queue. Shutting down.")
+            time.sleep(30)
+            break  # Exit loop when queue is empty
+
+    shutdown_instance()
+
+def shutdown_instance():
+    """
+    Safely shuts down the EC2 instance after work is done.
+    """
+    logging.info("Shutting down EC2 instance.")
+    subprocess.run(["shutdown", "-h", "now"])
+
 
 def download_from_s3(s3_path):
     bucket = s3_path.split('/')[2]
@@ -33,17 +105,17 @@ def upload_to_s3(local_path, s3_path):
     s3 = boto3.client('s3')
     s3.upload_file(local_path, bucket, key)
 
-def send_status_event(task_arn, file_name, status, progress=None):
-    events = boto3.client('events', region_name=os.environ['AWS_REGION'])
+def send_status_event(task_arn, file_name, status, aws_region, aws_account_id, progress=None):
+    events = boto3.client('events', region_name=aws_region)
     
     event = {
         'version': '0',
         'id': task_arn.split('/')[-1],
         'detail-type': 'ECS Task State Change',
         'source': 'aws.ecs',
-        'account': os.environ['AWS_ACCOUNT_ID'],
+        'account': aws_account_id,
         'time': datetime.utcnow().isoformat(),
-        'region': os.environ['AWS_REGION'],
+        'region': aws_region,
         'detail': {
             'taskArn': task_arn,
             'fileName': file_name,
@@ -111,16 +183,18 @@ def get_frame_rate(input_file):
     
     return frame_rate
 
-def process_video():
-    # Get environment variables
-    bucket_name = os.environ['S3_BUCKET']  # Will be passed from ECS task
-    input_key = os.environ['INPUT_KEY']    # From SQS/Lambda
+def process_video(s3_bucket, input_key, aws_region, aws_account_id, sqs_queue_url):
+    """
+    Process the video using the provided parameters.
+    """
+    # Use the parameters as needed in your process_video logic
+    logging.info(f"Starting video processing for bucket: {s3_bucket}, key: {input_key}")
     
     # Define paths within the bucket
-    input_path = f"s3://{bucket_name}/uploads/{input_key}"
+    input_path = f"s3://{s3_bucket}/uploads/{input_key}"
     base_name = os.path.splitext(os.path.basename(input_key))[0]
-    transcoding_path = f"s3://{bucket_name}/transcoding_samples/"
-    transcription_path = f"s3://{bucket_name}/transcriptions/{base_name}.json"
+    transcoding_path = f"s3://{s3_bucket}/transcoding_samples/"
+    transcription_path = f"s3://{s3_bucket}/transcriptions/{base_name}.json"
     
     task_arn = os.environ['ECS_CONTAINER_METADATA_URI_V4'].split('/')[-2]
     
@@ -160,7 +234,7 @@ def process_video():
     
     try:
         # Send status event: Download completed
-        send_status_event(task_arn, base_name, 'DOWNLOAD_COMPLETED', progress_steps['DOWNLOAD_COMPLETED'])
+        send_status_event(task_arn, base_name, 'DOWNLOAD_COMPLETED', aws_region, aws_account_id, progress_steps['DOWNLOAD_COMPLETED'])
 
         # Process audio separately (high quality)
         audio_output = f"{work_dir}/{base_name}-WAV.mp4"
@@ -200,7 +274,7 @@ def process_video():
             raise e
      
         # Send status event: Audio processing completed
-        send_status_event(task_arn, base_name, 'AUDIO_PROCESSING_COMPLETED', progress_steps['AUDIO_PROCESSING_COMPLETED'])
+        send_status_event(task_arn, base_name, 'AUDIO_PROCESSING_COMPLETED', aws_region, aws_account_id, progress_steps['AUDIO_PROCESSING_COMPLETED'])
         
         # Define video variants
         variants = [
@@ -279,7 +353,7 @@ def process_video():
             subprocess.run(cmd, shell=True, check=True)
 
         # Send status event: Video processing completed
-        send_status_event(task_arn, base_name, 'VIDEO_PROCESSING_COMPLETED', progress_steps['VIDEO_PROCESSING_COMPLETED'])
+        send_status_event(task_arn, base_name, 'VIDEO_PROCESSING_COMPLETED', aws_region, aws_account_id, progress_steps['VIDEO_PROCESSING_COMPLETED'])
 
         # Create the master playlist
         master_playlist_file = f"{work_dir}/{base_name}.m3u8"
@@ -302,7 +376,7 @@ def process_video():
                 f.write(f'{variant_playlist_m3u8}\n')
 
         # Send status event: Playlist creation completed
-        send_status_event(task_arn, base_name, 'PLAYLIST_CREATION_COMPLETED', progress_steps['PLAYLIST_CREATION_COMPLETED'])
+        send_status_event(task_arn, base_name, 'PLAYLIST_CREATION_COMPLETED', aws_region, aws_account_id, progress_steps['PLAYLIST_CREATION_COMPLETED'])
    
         # Upload all segments and manifests to S3
         for root, _, files in os.walk(work_dir):
@@ -312,21 +386,19 @@ def process_video():
                 upload_to_s3(local_file, s3_key)
 
         # Send status event: Upload completed
-        send_status_event(task_arn, base_name, 'UPLOAD_COMPLETED', progress_steps['UPLOAD_COMPLETED'])
+        send_status_event(task_arn, base_name, 'UPLOAD_COMPLETED', aws_region, aws_account_id, progress_steps['UPLOAD_COMPLETED'])
 
         # Clean up
         # subprocess.run(f'rm -rf {work_dir}', shell=True)
         # os.remove(local_input)
         
         # Send success event
-        send_status_event(task_arn, base_name, 'COMPLETED', 100)
+        send_status_event(task_arn, base_name, 'COMPLETED', aws_region, aws_account_id, 100)
         
     except Exception as e:
         # Send failure event
-        send_status_event(task_arn, base_name, 'FAILED', 0)
+        send_status_event(task_arn, base_name, 'FAILED', aws_region, aws_account_id, 0)
         raise e
 
-
-
 if __name__ == "__main__":
-    process_video()
+    poll_queue()
