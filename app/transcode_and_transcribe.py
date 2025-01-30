@@ -6,13 +6,18 @@ from datetime import datetime
 import whisper
 import logging
 import time
+import requests
 
-# Initialize S3 client
+
+# Initialize AWS clients
 s3_client = boto3.client('s3')
-
-# Initialize SQS client
+ec2 = boto3.client('ec2')
 sqs = boto3.client('sqs')
+
+INSTANCE_ID = requests.get('http://169.254.169.254/latest/meta-data/instance-id').text
+
 QUEUE_URL = os.environ.get("SQS_QUEUE_URL")
+ASG_NAME = os.environ.get("ASG_NAME")  # Auto Scaling Group Name
 
 # Set up logging
 logging.basicConfig(
@@ -20,6 +25,21 @@ logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s %(levelname)s: %(message)s'
 )
+
+
+def set_instance_protection(enabled):
+    """
+    Sets scale-in protection for this EC2 instance.
+    """
+    try:
+        ec2.set_instance_protection(
+            InstanceIds=[INSTANCE_ID],
+            AutoScalingGroupName=ASG_NAME,
+            ProtectedFromScaleIn=enabled
+        )
+        print(f"Set scale-in protection: {enabled}")
+    except Exception as e:
+        print(f"Failed to set instance protection: {e}")
 
 def process_message(message_body):
     """
@@ -62,6 +82,7 @@ def poll_queue():
         if 'Messages' in response:
             for message in response['Messages']:
                 try:
+                    set_instance_protection(True)
                     process_message(message['Body'])  # Process the message
 
                     # Only delete the message if processing was successful
@@ -70,7 +91,7 @@ def poll_queue():
                         ReceiptHandle=message['ReceiptHandle']
                     )
                     logging.info(f"Deleted message: {message['MessageId']}")
-
+                    set_instance_protection(False)
                 except Exception as e:
                     logging.error(f"Error processing message: {e}")
                     # Do NOT delete the message if an error occurs
@@ -86,7 +107,7 @@ def shutdown_instance():
     Safely shuts down the EC2 instance after work is done.
     """
     logging.info("Shutting down EC2 instance.")
-    subprocess.run(["shutdown", "-h", "now"])
+    # subprocess.run(["shutdown", "-h", "now"])
 
 
 def download_from_s3(s3_path):
