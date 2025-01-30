@@ -17,89 +17,155 @@ sqs = boto3.client('sqs')
 INSTANCE_ID = requests.get('http://169.254.169.254/latest/meta-data/instance-id').text
 
 QUEUE_URL = os.environ.get("SQS_QUEUE_URL")
-ASG_NAME = os.environ.get("ASG_NAME")  # Auto Scaling Group Name
 
-# Set up logging
+# Set up logging to both file and console
 logging.basicConfig(
-    filename='/app/whisper_transcription.log',
     level=logging.DEBUG,
-    format='%(asctime)s %(levelname)s: %(message)s'
+    format='%(asctime)s %(levelname)s: %(message)s',
+    handlers=[
+        logging.FileHandler('/app/whisper_transcription.log'),
+        logging.StreamHandler()  # This sends logs to console
+    ]
 )
 
-autoscaling = boto3.client('autoscaling')
-
-def set_instance_protection(enabled):
+def set_termination_protection(enabled):
     """
-    Sets scale-in protection for this EC2 instance.
+    Sets termination protection for this EC2 instance.
     """
     try:
-        autoscaling.set_instance_protection(
-            InstanceIds=[INSTANCE_ID],
-            AutoScalingGroupName=ASG_NAME,
-            ProtectedFromScaleIn=enabled
+        ec2.modify_instance_attribute(
+            InstanceId=INSTANCE_ID,
+            DisableApiTermination={
+                'Value': enabled
+            }
         )
-        print(f"Set scale-in protection: {enabled}")
+        logging.info(f"Set termination protection: {enabled}")
     except Exception as e:
-        print(f"Failed to set instance protection: {e}")
+        logging.error(f"Failed to set termination protection: {e}")
 
-def process_message(message_body):
+def check_queue_status():
     """
-    Process the message and call process_video with extracted parameters.
+    Check queue attributes including in-flight messages.
     """
     try:
-        message_data = json.loads(message_body)
-        required_fields = ['S3_BUCKET', 'INPUT_KEY', 'AWS_REGION', 'AWS_ACCOUNT_ID']
-        
-        # Validate required fields
-        for field in required_fields:
-            if field not in message_data:
-                raise ValueError(f"Missing required field: {field}")
-        
-        process_video(
-            message_data['S3_BUCKET'],
-            message_data['INPUT_KEY'],
-            message_data['AWS_REGION'],
-            message_data['AWS_ACCOUNT_ID']
+        response = sqs.get_queue_attributes(
+            QueueUrl=QUEUE_URL,
+            AttributeNames=[
+                'ApproximateNumberOfMessages',
+                'ApproximateNumberOfMessagesNotVisible'
+            ]
         )
-    except json.JSONDecodeError as e:
-        logging.error(f"Failed to decode message body: {e}")
-        raise
+        visible = int(response['Attributes']['ApproximateNumberOfMessages'])
+        in_flight = int(response['Attributes']['ApproximateNumberOfMessagesNotVisible'])
+        
+        logging.info(f"Queue status: {visible} visible messages, {in_flight} in-flight messages")
+        return visible, in_flight
     except Exception as e:
-        logging.error(f"Error processing message: {e}")
-        raise
+        logging.error(f"Failed to get queue attributes: {e}")
+        return 0, 0
+
+def extend_message_visibility(receipt_handle, timeout):
+    """
+    Extend the visibility timeout for a message being processed.
+    """
+    try:
+        sqs.change_message_visibility(
+            QueueUrl=QUEUE_URL,
+            ReceiptHandle=receipt_handle,
+            VisibilityTimeout=timeout
+        )
+        logging.info(f"Extended message visibility timeout to {timeout} seconds")
+    except Exception as e:
+        logging.error(f"Failed to extend message visibility: {e}")
 
 def poll_queue():
     """
     Poll messages from SQS, process, and delete them.
     """
+    empty_queue_count = 0
+    max_empty_attempts = 3
+    stale_message_count = 0
+    max_stale_attempts = 5  # Number of times to check for stale messages
+
     while True:
+        visible, in_flight = check_queue_status()
+        
+        if in_flight > 0:
+            stale_message_count += 1
+            logging.info(f"Messages are still being processed. Attempt {stale_message_count}/{max_stale_attempts}")
+            
+            if stale_message_count >= max_stale_attempts:
+                logging.warning("Max stale attempts reached. Will try to receive new messages.")
+                stale_message_count = 0
+            else:
+                time.sleep(30)
+                continue
+
+        logging.info("Polling for messages...")
         response = sqs.receive_message(
             QueueUrl=QUEUE_URL,
             MaxNumberOfMessages=1,
-            WaitTimeSeconds=10,  # Long polling
-            VisibilityTimeout=3600
+            WaitTimeSeconds=20,
+            VisibilityTimeout=3600,
+            AttributeNames=['All']
         )
 
         if 'Messages' in response:
+            empty_queue_count = 0
             for message in response['Messages']:
                 try:
-                    set_instance_protection(True)
-                    process_message(message['Body'])  # Process the message
+                    logging.info(f"Processing message: {message['MessageId']}")
+                    set_termination_protection(True)
+                    
+                    # Start a background thread to extend visibility timeout periodically
+                    def extend_visibility():
+                        while True:
+                            time.sleep(1800)  # Extend every 30 minutes
+                            extend_message_visibility(message['ReceiptHandle'], 3600)
+                    
+                    import threading
+                    visibility_thread = threading.Thread(target=extend_visibility)
+                    visibility_thread.daemon = True
+                    visibility_thread.start()
 
-                    # Only delete the message if processing was successful
+                    # Process the message
+                    process_message(message['Body'])
+
+                    # Delete the message after successful processing
                     sqs.delete_message(
                         QueueUrl=QUEUE_URL,
                         ReceiptHandle=message['ReceiptHandle']
                     )
-                    logging.info(f"Deleted message: {message['MessageId']}")
-                    set_instance_protection(False)
+                    logging.info(f"Successfully processed and deleted message: {message['MessageId']}")
+                    set_termination_protection(False)
                 except Exception as e:
                     logging.error(f"Error processing message: {e}")
-                    # Do NOT delete the message if an error occurs
+                    set_termination_protection(False)
+                    # Don't delete the message - it will become visible again after timeout
         else:
-            logging.info("No messages left in queue. Shutting down.")
-            time.sleep(30)
-            break  # Exit loop when queue is empty
+            empty_queue_count += 1
+            logging.info(f"No messages found. Empty queue count: {empty_queue_count}/{max_empty_attempts}")
+            
+            if empty_queue_count >= max_empty_attempts:
+                logging.info(f"Queue has been empty for {max_empty_attempts} consecutive polls. Preparing for shutdown...")
+                time.sleep(60)  # Wait one more minute to be sure
+                
+                # Double-check for new messages before shutting down
+                final_check = sqs.receive_message(
+                    QueueUrl=QUEUE_URL,
+                    MaxNumberOfMessages=1,
+                    WaitTimeSeconds=10
+                )
+                
+                if 'Messages' not in final_check:
+                    logging.info("Final check confirmed queue is empty. Initiating shutdown...")
+                    break
+                else:
+                    logging.info("Found new messages during final check. Continuing to process...")
+                    empty_queue_count = 0
+                    continue
+            
+            time.sleep(30)  # Wait between polls when queue is empty
 
     shutdown_instance()
 
@@ -108,8 +174,75 @@ def shutdown_instance():
     Safely shuts down the EC2 instance after work is done.
     """
     logging.info("Shutting down EC2 instance.")
-    # subprocess.run(["shutdown", "-h", "now"])
+    try:
+        # ec2.terminate_instances(InstanceIds=[INSTANCE_ID])
+        logging.info(f"Successfully initiated termination of instance {INSTANCE_ID}")
+    except Exception as e:
+        logging.error(f"Failed to terminate instance: {e}")
 
+def is_message_being_processed(message_id):
+    """
+    Check if a message is currently being processed by checking for a marker file.
+    """
+    marker_file = f"/tmp/processing_{message_id}"
+    return os.path.exists(marker_file)
+
+def mark_message_processing(message_id, processing=True):
+    """
+    Create or remove a marker file to indicate message processing status.
+    """
+    marker_file = f"/tmp/processing_{message_id}"
+    if processing:
+        with open(marker_file, 'w') as f:
+            f.write(str(time.time()))
+    else:
+        if os.path.exists(marker_file):
+            os.remove(marker_file)
+
+def process_message(message_body):
+    """
+    Process the message and call process_video with extracted parameters.
+    """
+    try:
+        message_data = json.loads(message_body)
+        message_id = message_data.get('MessageId', str(time.time()))
+        
+        if is_message_being_processed(message_id):
+            logging.warning(f"Message {message_id} appears to be already processing. Skipping.")
+            return
+            
+        mark_message_processing(message_id, True)
+        try:
+            # Extract AWS account ID from SQS queue URL
+            if 'AWS_ACCOUNT_ID' not in message_data:
+                queue_parts = QUEUE_URL.split('/')
+                if len(queue_parts) >= 4:
+                    message_data['AWS_ACCOUNT_ID'] = queue_parts[3]
+                    logging.info(f"Extracted AWS_ACCOUNT_ID from queue URL: {message_data['AWS_ACCOUNT_ID']}")
+            
+            required_fields = ['S3_BUCKET', 'INPUT_KEY', 'AWS_REGION']
+            
+            # Validate required fields
+            for field in required_fields:
+                if field not in message_data:
+                    raise ValueError(f"Missing required field: {field}")
+            
+            process_video(
+                message_data['S3_BUCKET'],
+                message_data['INPUT_KEY'],
+                message_data['AWS_REGION'],
+                message_data.get('AWS_ACCOUNT_ID', ''),  # Make account ID optional
+                QUEUE_URL  # Pass the queue URL
+            )
+        finally:
+            mark_message_processing(message_id, False)
+            
+    except json.JSONDecodeError as e:
+        logging.error(f"Failed to decode message body: {e}")
+        raise
+    except Exception as e:
+        logging.error(f"Error processing message: {e}")
+        raise
 
 def download_from_s3(s3_path):
     bucket = s3_path.split('/')[2]
