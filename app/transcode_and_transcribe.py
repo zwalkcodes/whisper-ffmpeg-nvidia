@@ -311,33 +311,15 @@ def process_video(s3_bucket, input_key, video_table, uhd_enabled):
      
         update_progress(input_key, progress_steps['AUDIO_PROCESSING_COMPLETED'], video_table)
         
-        # Define video variants
+        # Define video variants with only H.264
         variants = [
-            {
-                "name": "UHD-H265",
-                "size": "3840x2160",
-                "video_codec": "hevc_nvenc",
-                "video_opts": "-preset slow -rc vbr_hq -qmin 0 -qmax 28 -b:v 10M -profile:v main",
-                "bitrate": "15000k",
-                'codec': 'hev1.1.6.L153.B0',
-                "audio_opts": "-c:a aac -b:a 192k"
-            },
             {
                 "name": "UHD-H264",
                 "size": "3840x2160",
                 "video_codec": "h264_nvenc",
                 "video_opts": "-preset slow -rc vbr_hq -qmin 0 -qmax 28 -b:v 12M -profile:v main",
-                "bitrate": "17000k",
+                "bitrate": "12000k",
                 'codec': 'avc1.640028',
-                "audio_opts": "-c:a aac -b:a 192k"
-            },
-            {
-                "name": "1080P-H265",
-                "size": "1920x1080",
-                "video_codec": "hevc_nvenc",
-                "video_opts": "-preset slow -rc vbr_hq -qmin 0 -qmax 28 -b:v 5M -profile:v main",
-                "bitrate": "5000k",
-                'codec': 'hev1.1.6.L123.B0',
                 "audio_opts": "-c:a aac -b:a 192k"
             },
             {
