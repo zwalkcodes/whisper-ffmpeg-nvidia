@@ -134,7 +134,7 @@ def process_message(message_body):
         
         try:
             # Add required fields except UHD_ENABLED
-            required_fields = ['S3_BUCKET', 'INPUT_KEY', 'VIDEO_TABLE']
+            required_fields = ['S3_BUCKET', 'INPUT_PATH', 'VIDEO_TABLE']
             
             # Validate required fields
             for field in required_fields:
@@ -143,7 +143,7 @@ def process_message(message_body):
             
             process_video(
                 message_data['S3_BUCKET'],
-                message_data['INPUT_KEY'],
+                message_data['INPUT_PATH'],
                 message_data['VIDEO_TABLE'],  # Pass VIDEO_TABLE to process_video
                 uhd_enabled  # Pass UHD_ENABLED to process_video
             )     
@@ -220,10 +220,13 @@ def get_frame_rate(input_file):
     
     return frame_rate
 
-def process_video(s3_bucket, input_key, video_table, uhd_enabled):
+def process_video(s3_bucket, input_path, video_table, uhd_enabled):
     """
     Process the video using the provided parameters.
     """
+    # Extract the filename without extension for update_progress
+    input_key = os.path.basename(input_path)
+
     # Pass video_table to update_progress calls
     update_progress(input_key, 0, video_table)  # Starting progress
    
@@ -231,8 +234,7 @@ def process_video(s3_bucket, input_key, video_table, uhd_enabled):
     logging.info(f"Starting video processing for bucket: {s3_bucket}, key: {input_key}")
 
     # Define paths within the bucket
-    input_path = f"s3://{s3_bucket}/uploads/{input_key}"
-    base_name = os.path.splitext(os.path.basename(input_key))[0]
+    base_name = os.path.splitext(os.path.basename(input_path))[0]
     transcoding_path = f"s3://{s3_bucket}/transcoding_samples/"
     transcription_path = f"s3://{s3_bucket}/transcriptions/{base_name}.json"
     
