@@ -383,10 +383,11 @@ def process_video(s3_bucket, input_key, video_table, uhd_enabled):
             
             logging.info(f"Processing variant {idx + 1}/{total_variants}: {variant['name']}")
             cmd = (
-                f'ffmpeg -y -i {local_input} '
+                f'ffmpeg -y -hwaccel cuda -c:v h264_cuvid '
+                f'-i {local_input} '
                 f'-c:v {variant["video_codec"]} {variant["video_opts"]} '
                 f'-maxrate {variant["bitrate"]} -bufsize {int(1.5 * int(variant["bitrate"].replace("k", "000")))} '
-                f'-vf scale={variant["size"].replace("x", ":")}:force_original_aspect_ratio=decrease,pad={variant["size"].replace("x", ":")}:(ow-iw)/2:(oh-ih)/2 '
+                f'-vf scale_npp={variant["size"].replace("x", ":")}:force_original_aspect_ratio=decrease,pad={variant["size"].replace("x", ":")}:(ow-iw)/2:(oh-ih)/2 '
                 f'{variant["audio_opts"]} '
                 f'-g {keyframe_interval} -keyint_min {keyframe_interval} '
                 f'-sc_threshold 0 '
