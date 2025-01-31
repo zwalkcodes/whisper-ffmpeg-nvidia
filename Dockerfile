@@ -39,4 +39,4 @@ COPY app/ .
 RUN chmod +x transcode_and_transcribe.py
 
 # Define the command to run your application
-CMD ["python3", "transcode_and_transcribe.py"]
+ENTRYPOINT ["/bin/bash", "-c"]
