@@ -16,13 +16,11 @@ sqs = boto3.client('sqs')
 dynamodb = boto3.client('dynamodb')
 
 INSTANCE_ID = requests.get('http://169.254.169.254/latest/meta-data/instance-id').text
-
 QUEUE_URL = os.environ.get("SQS_QUEUE_URL")
-VIDEO_TABLE = os.environ.get('VIDEO_TABLE_NAME')
 
 # Set up logging to both file and console
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format='%(asctime)s %(levelname)s: %(message)s',
     handlers=[
         logging.FileHandler('/app/whisper_transcription.log'),
@@ -127,9 +125,15 @@ def process_message(message_body):
     """
     try:
         message_data = json.loads(message_body)
-           
+        
+        # Set default value for UHD_ENABLED if not present
+        uhd_enabled = message_data.get('UHD_ENABLED', False)
+
+        logging.info(f"UHD_ENABLED: {uhd_enabled}")
+        
         try:
-            required_fields = ['S3_BUCKET', 'INPUT_KEY']
+            # Add required fields except UHD_ENABLED
+            required_fields = ['S3_BUCKET', 'INPUT_KEY', 'VIDEO_TABLE']
             
             # Validate required fields
             for field in required_fields:
@@ -139,6 +143,8 @@ def process_message(message_body):
             process_video(
                 message_data['S3_BUCKET'],
                 message_data['INPUT_KEY'],
+                message_data['VIDEO_TABLE'],  # Pass VIDEO_TABLE to process_video
+                uhd_enabled  # Pass UHD_ENABLED to process_video
             )     
         except json.JSONDecodeError as e:
             logging.error(f"Failed to decode message body: {e}")
@@ -162,34 +168,6 @@ def upload_to_s3(local_path, s3_path):
     
     s3 = boto3.client('s3')
     s3.upload_file(local_path, bucket, key)
-
-def send_status_event(task_arn, file_name, status, aws_region, aws_account_id, progress=None):
-    events = boto3.client('events', region_name=aws_region)
-    
-    event = {
-        'version': '0',
-        'id': task_arn.split('/')[-1],
-        'detail-type': 'ECS Task State Change',
-        'source': 'aws.ecs',
-        'account': aws_account_id,
-        'time': datetime.utcnow().isoformat(),
-        'region': aws_region,
-        'detail': {
-            'taskArn': task_arn,
-            'fileName': file_name,
-            'status': status
-        }
-    }
-    
-    if progress is not None:
-        event['detail']['progress'] = progress
-    
-    events.put_events(Entries=[{
-        'Source': 'aws.ecs',
-        'DetailType': 'ECS Task State Change',
-        'Detail': json.dumps(event),
-        'EventBusName': 'default'
-    }])
 
 def get_video_metadata(input_path):
     # Use ffprobe to get video metadata
@@ -241,10 +219,13 @@ def get_frame_rate(input_file):
     
     return frame_rate
 
-def process_video(s3_bucket, input_key):
+def process_video(s3_bucket, input_key, video_table, uhd_enabled):
     """
     Process the video using the provided parameters.
     """
+    # Pass video_table to update_progress calls
+    update_progress(input_key, 0, video_table)  # Starting progress
+   
     # Use the parameters as needed in your process_video logic
     logging.info(f"Starting video processing for bucket: {s3_bucket}, key: {input_key}")
 
@@ -254,20 +235,17 @@ def process_video(s3_bucket, input_key):
     transcoding_path = f"s3://{s3_bucket}/transcoding_samples/"
     transcription_path = f"s3://{s3_bucket}/transcriptions/{base_name}.json"
     
-    update_progress(base_name, 0)  # Starting progress
-   
     # Define progress steps
     progress_steps = {
         'DOWNLOAD_COMPLETED': 10,
         'AUDIO_PROCESSING_COMPLETED': 20,
         'VIDEO_PROCESSING_COMPLETED': 70,
-        'PLAYLIST_CREATION_COMPLETED': 80,
-        'DASH_MANIFEST_CREATION_COMPLETED': 90,
+        'PLAYLIST_CREATION_COMPLETED': 90,
         'UPLOAD_COMPLETED': 100
     }
 
     local_input = download_from_s3(input_path)
-    update_progress(base_name, progress_steps['DOWNLOAD_COMPLETED'])
+    update_progress(input_key, progress_steps['DOWNLOAD_COMPLETED'], video_table)
 
     
     # Get video metadata
@@ -330,10 +308,19 @@ def process_video(s3_bucket, input_key):
             logging.error("S3 upload failed: %s", e)
             raise e
      
-        update_progress(base_name, progress_steps['AUDIO_PROCESSING_COMPLETED'])
+        update_progress(input_key, progress_steps['AUDIO_PROCESSING_COMPLETED'], video_table)
         
         # Define video variants
         variants = [
+            {
+                "name": "UHD-H265",
+                "size": "3840x2160",
+                "video_codec": "hevc_nvenc",
+                "video_opts": "-preset slow -rc vbr_hq -qmin 0 -qmax 28 -b:v 10M -profile:v main",
+                "bitrate": "15000k",
+                'codec': 'hev1.1.6.L153.B0',
+                "audio_opts": "-c:a aac -b:a 192k"
+            },
             {
                 "name": "UHD-H264",
                 "size": "3840x2160",
@@ -341,6 +328,15 @@ def process_video(s3_bucket, input_key):
                 "video_opts": "-preset slow -rc vbr_hq -qmin 0 -qmax 28 -b:v 12M -profile:v main",
                 "bitrate": "17000k",
                 'codec': 'avc1.640028',
+                "audio_opts": "-c:a aac -b:a 192k"
+            },
+            {
+                "name": "1080P-H265",
+                "size": "1920x1080",
+                "video_codec": "hevc_nvenc",
+                "video_opts": "-preset slow -rc vbr_hq -qmin 0 -qmax 28 -b:v 5M -profile:v main",
+                "bitrate": "5000k",
+                'codec': 'hev1.1.6.L123.B0',
                 "audio_opts": "-c:a aac -b:a 192k"
             },
             {
@@ -378,6 +374,10 @@ def process_video(s3_bucket, input_key):
             if int(v['size'].split('x')[0]) <= width and int(v['size'].split('x')[1]) <= height
         ]
 
+        # If UHD is not enabled, remove UHD variants
+        if not uhd_enabled:
+            filtered_variants = [v for v in filtered_variants if "UHD" not in v['name']]
+
         # Get the frame rate of the input video
         frame_rate = get_frame_rate(local_input)
         keyframe_interval = int(frame_rate * 2)  # 2-second interval
@@ -386,12 +386,19 @@ def process_video(s3_bucket, input_key):
         # Create HLS segments and playlists for each variant
         variant_playlists = []
         m3u8_playlists = []
-        for variant in filtered_variants:
+        total_variants = len(filtered_variants)
+        for idx, variant in enumerate(filtered_variants):
             variant_playlist = f"{work_dir}/{base_name}-{variant['name']}.m3u8"
             variant_playlist_m3u8 = f"{base_name}-{variant['name']}.m3u8"
             variant_playlists.append(variant_playlist)
             m3u8_playlists.append(variant_playlist_m3u8)
             
+            # Calculate progress for this variant
+            variant_progress = progress_steps['AUDIO_PROCESSING_COMPLETED'] + \
+                             ((progress_steps['PLAYLIST_CREATION_COMPLETED'] - progress_steps['AUDIO_PROCESSING_COMPLETED']) * 
+                              (idx + 1) / total_variants)
+            
+            logging.info(f"Processing variant {idx + 1}/{total_variants}: {variant['name']}")
             cmd = (
                 f'ffmpeg -y -i {local_input} '
                 f'-c:v {variant["video_codec"]} {variant["video_opts"]} '
@@ -407,30 +414,28 @@ def process_video(s3_bucket, input_key):
                 f'{variant_playlist}'
             )
             subprocess.run(cmd, shell=True, check=True)
+            
+            # Update progress after each variant is processed
+            update_progress(input_key, int(variant_progress), video_table)
+            logging.info(f"Completed variant {variant['name']} ({idx + 1}/{total_variants})")
 
         # Create the master playlist
         master_playlist_file = f"{work_dir}/{base_name}.m3u8"
-        with open(master_playlist_file, 'w') as f:
-            f.write("#EXTM3U\n")
-            f.write("#EXT-X-VERSION:6\n")
-            f.write("#EXT-X-INDEPENDENT-SEGMENTS\n")
-            
-            # Add subtitle tracks (only once at the top)
-            f.write(f'#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",LANGUAGE="en",AUTOSELECT=YES,DEFAULT=YES,URI="subtitles/{base_name}_en.vtt"\n')
-            f.write(f'#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="Spanish",LANGUAGE="es",AUTOSELECT=NO,DEFAULT=NO,URI="subtitles/{base_name}_es.vtt"\n')
-            
-            # Add each variant to the master playlist
-            for variant, variant_playlist, variant_playlist_m3u8 in zip(filtered_variants, variant_playlists, m3u8_playlists):
-                numeric_bitrate = variant["bitrate"].replace("k", "000")
-                average_bandwidth = int(numeric_bitrate) // 2  # Example calculation for average bandwidth
-                combined_codecs = f'{variant["codec"]},mp4a.40.2'
+        non_uhd_variants = [v for v in filtered_variants if "UHD" not in v['name']]
+        create_master_playlist(master_playlist_file, non_uhd_variants, m3u8_playlists, frame_rate, base_name)
 
-                f.write(f'#EXT-X-STREAM-INF:BANDWIDTH={numeric_bitrate},AVERAGE-BANDWIDTH={average_bandwidth},RESOLUTION={variant["size"]},CODECS="{combined_codecs}",FRAME-RATE={frame_rate},SUBTITLES="subs"\n')
-                f.write(f'{variant_playlist_m3u8}\n')
+        # Create an additional UHD playlist if UHD_ENABLED is true
+        if uhd_enabled:
+            uhd_variants = [v for v in filtered_variants if "UHD" in v['name']]
+            uhd_playlist_file = f"{work_dir}/{base_name}-UHD.m3u8"
+            create_master_playlist(uhd_playlist_file, uhd_variants + non_uhd_variants, m3u8_playlists, frame_rate, base_name)
 
         # Send status event: Playlist creation completed
-        update_progress(base_name, progress_steps['PLAYLIST_CREATION_COMPLETED'])
+        update_progress(input_key, progress_steps['PLAYLIST_CREATION_COMPLETED'], video_table)
    
+        # Delete the input video file
+        os.remove(local_input)
+
         # Upload all segments and manifests to S3
         for root, _, files in os.walk(work_dir):
             for file in files:
@@ -439,28 +444,25 @@ def process_video(s3_bucket, input_key):
                 upload_to_s3(local_file, s3_key)
 
         # Send status event: Upload completed
-        update_progress(base_name, progress_steps['UPLOAD_COMPLETED'])
+        update_progress(input_key, progress_steps['UPLOAD_COMPLETED'], video_table)
 
         # Clean up
-        # subprocess.run(f'rm -rf {work_dir}', shell=True)
-        # os.remove(local_input)
-        
+        subprocess.run(f'rm -rf {work_dir}', shell=True)
+
         # Send success event
-        update_progress(base_name, 100)
+        update_progress(input_key, 100, video_table)
         
     except Exception as e:
-        # Send failure event
-        update_progress(base_name, 0)
-        logging.error(f"Failed to process video {base_name}: {e}")
+        logging.error(f"Failed to process video {input_key}: {e}")
         raise
 
-def update_progress(video_id, percent_complete):
+def update_progress(video_id, percent_complete, table_name):
     """
     Update video processing progress in DynamoDB.
     """
     try:
         dynamodb.update_item(
-            TableName=VIDEO_TABLE,
+            TableName=table_name,  # Use the table name from the message
             Key={
                 'FileName': {'S': video_id}
             },
@@ -473,6 +475,24 @@ def update_progress(video_id, percent_complete):
         logging.info(f"Updated progress for {video_id}: {percent_complete}%")
     except Exception as e:
         logging.error(f"Failed to update progress: {e}")
+
+def create_master_playlist(file_path, variants, m3u8_playlists, frame_rate, base_name):
+    with open(file_path, 'w') as f:
+        f.write("#EXTM3U\n")
+        f.write("#EXT-X-VERSION:6\n")
+        f.write("#EXT-X-INDEPENDENT-SEGMENTS\n")
+        
+        # Add subtitle tracks (only once at the top)
+        f.write(f'#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",LANGUAGE="en",AUTOSELECT=YES,DEFAULT=YES,URI="subtitles/{base_name}_en.vtt"\n')
+        f.write(f'#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="Spanish",LANGUAGE="es",AUTOSELECT=NO,DEFAULT=NO,URI="subtitles/{base_name}_es.vtt"\n')
+        
+        for variant, variant_playlist_m3u8 in zip(variants, m3u8_playlists):
+            numeric_bitrate = variant["bitrate"].replace("k", "000")
+            average_bandwidth = int(numeric_bitrate) // 2
+            combined_codecs = f'{variant["codec"]},mp4a.40.2'
+
+            f.write(f'#EXT-X-STREAM-INF:BANDWIDTH={numeric_bitrate},AVERAGE-BANDWIDTH={average_bandwidth},RESOLUTION={variant["size"]},CODECS="{combined_codecs}",FRAME-RATE={frame_rate},SUBTITLES="subs"\n')
+            f.write(f'{variant_playlist_m3u8}\n')
 
 if __name__ == "__main__":
     poll_queue()
