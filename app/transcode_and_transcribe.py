@@ -335,7 +335,7 @@ def process_video(s3_bucket, input_key, video_table, uhd_enabled):
                 "name": "720P-H264",
                 "size": "1280x720",
                 "video_codec": "h264_nvenc",
-                "video_opts": "-preset slow -rc vbr_hq -qmin 0 -qmax 28 -b:v 4M -profile:v high",
+                "video_opts": "-preset slow -rc vbr_hq -qmin 0 -qmax 28 -b:v 4M -profile:v main",
                 "bitrate": "4000k",
                 'codec': 'avc1.64001f',
                 "audio_opts": "-c:a aac -b:a 192k"
@@ -344,7 +344,7 @@ def process_video(s3_bucket, input_key, video_table, uhd_enabled):
                 "name": "540P-H264",
                 "size": "960x540",
                 "video_codec": "h264_nvenc",
-                "video_opts": "-preset slow -rc vbr_hq -qmin 0 -qmax 28 -b:v 2M -profile:v high",
+                "video_opts": "-preset slow -rc vbr_hq -qmin 0 -qmax 28 -b:v 2M -profile:v main",
                 "bitrate": "2500k",
                 'codec': 'avc1.64001f',
                 "audio_opts": "-c:a aac -b:a 192k"
