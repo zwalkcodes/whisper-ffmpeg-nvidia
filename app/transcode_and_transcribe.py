@@ -430,7 +430,7 @@ def process_video(s3_bucket, input_key, video_table, uhd_enabled):
         update_progress(input_key, progress_steps['UPLOAD_COMPLETED'], video_table)
 
         # Clean up
-        subprocess.run(f'rm -rf {work_dir}', shell=True)
+        subprocess.run(f'rm -rf {work_dir}/*', shell=True)
 
         # Send success event
         update_progress(input_key, 100, video_table)
