@@ -484,8 +484,8 @@ def create_master_playlist(file_path, variants, m3u8_playlists, frame_rate, base
         f.write("#EXT-X-INDEPENDENT-SEGMENTS\n")
         
         # Add subtitle tracks (only once at the top)
-        f.write(f'#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",LANGUAGE="en",AUTOSELECT=YES,DEFAULT=YES,URI="subtitles/{base_name}_en.vtt"\n')
-        f.write(f'#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="Spanish",LANGUAGE="es",AUTOSELECT=NO,DEFAULT=NO,URI="subtitles/{base_name}_es.vtt"\n')
+        f.write(f'#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",LANGUAGE="en",AUTOSELECT=YES,DEFAULT=YES,URI="../subtitles/{base_name}_en.vtt"\n')
+        f.write(f'#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="Spanish",LANGUAGE="es",AUTOSELECT=NO,DEFAULT=NO,URI="../subtitles/{base_name}_es.vtt"\n')
         
         for variant, variant_playlist_m3u8 in zip(variants, m3u8_playlists):
             numeric_bitrate = variant["bitrate"].replace("k", "000")
