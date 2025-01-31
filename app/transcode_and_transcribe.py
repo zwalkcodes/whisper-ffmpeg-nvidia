@@ -115,7 +115,7 @@ def shutdown_instance():
     """
     logging.info("Shutting down EC2 instance.")
     try:
-        # ec2.terminate_instances(InstanceIds=[INSTANCE_ID])
+        ec2.terminate_instances(InstanceIds=[INSTANCE_ID])
         logging.info(f"Successfully initiated termination of instance {INSTANCE_ID}")
     except Exception as e:
         logging.error(f"Failed to terminate instance: {e}")
