@@ -456,7 +456,7 @@ def update_progress(video_id, percent_complete, table_name, error_message=None):
             
             # If item exists, update it
             if 'Item' in response:
-                update_expression = "SET ProcessingStatus = :status, updatedAt = :time"
+                update_expression = "SET ProcessingStatus = :status, UpdatedAt = :time"
                 expression_values = {
                     ':status': {'S': str(percent_complete)},
                     ':time': {'S': current_time}
@@ -480,7 +480,7 @@ def update_progress(video_id, percent_complete, table_name, error_message=None):
                     'FileName': {'S': video_id},
                     'ProcessingStatus': {'S': str(percent_complete)},
                     'CreatedDate': {'S': current_time},
-                    'updatedAt': {'S': current_time}
+                    'UpdatedAt': {'S': current_time}
                 }
                 if error_message:
                     item['ErrorMessage'] = {'S': error_message}
