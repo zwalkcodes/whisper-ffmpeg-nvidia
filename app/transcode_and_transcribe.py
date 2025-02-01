@@ -457,7 +457,8 @@ def update_progress(video_id, percent_complete, table_name, error_message=None):
         item = {
             'FileName': {'S': video_id},
             'ProcessingStatus': {'S': str(percent_complete)},
-            'updatedAt': {'S': datetime.utcnow().isoformat()}
+            'updatedAt': {'S': datetime.utcnow().isoformat()},
+            'CreatedDate': {'S': datetime.utcnow().isoformat()}
         }
 
         if error_message:
