@@ -5,9 +5,7 @@ import json
 from datetime import datetime
 import whisper
 import logging
-import time
 import requests
-import torch
 
 region = os.getenv('AWS_REGION', 'us-west-1')  # Default to 'us-west-1' if not set
 
@@ -191,20 +189,12 @@ def transcribe_audio(local_file_path, output_file):
     try:
         logging.info(f"Loading Whisper model and starting transcription for {local_file_path}")
         model = whisper.load_model("large").cuda()
-
-        # Use the updated mixed precision context manager
-        with torch.amp.autocast('cuda'):
-            result = model.transcribe(local_file_path, word_timestamps=True)
+        result = model.transcribe(local_file_path, word_timestamps=True)
 
         # Save the transcription as a JSON file
         with open(output_file, 'w') as f:
             json.dump(result, f, indent=4)
         logging.info(f"Saved transcription to {output_file}")
-
-        # Clean up model and result to free memory
-        del model
-        del result
-        torch.cuda.empty_cache()
 
     except Exception as e:
         logging.error(f"Error during transcription: {e}")
@@ -313,6 +303,7 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled):
                 # Delete the audio output file after successful upload
                 if os.path.exists(audio_output):
                     os.remove(audio_output)
+                    os.remove(transcription_output)
                     logging.info("Deleted audio output file: %s", audio_output)
             except Exception as e:
                 logging.error("S3 upload failed: %s", e)
