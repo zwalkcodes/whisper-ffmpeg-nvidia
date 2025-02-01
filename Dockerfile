@@ -14,6 +14,7 @@ RUN apt-get update && apt-get upgrade -y \
     python3 \
     python3-pip \
     python3-dev \
+    vim \
     && apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
@@ -27,8 +28,7 @@ RUN pip3 install --no-cache-dir --upgrade pip setuptools wheel && \
     openai-whisper \
     ffmpeg-python \
     boto3 \
-    awscli \
-    vim
+    awscli
 
 # Set the working directory
 WORKDIR /app
