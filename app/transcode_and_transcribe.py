@@ -108,7 +108,7 @@ def poll_queue():
                 logging.info(f"Waiting {wait_time} seconds before next attempt...")
 
     logging.info("No more messages to process. Shutting down...")
-    # shutdown_instance()
+    shutdown_instance()
 
 def shutdown_instance():
     """
@@ -192,8 +192,8 @@ def transcribe_audio(local_file_path, output_file):
         logging.info(f"Loading Whisper model and starting transcription for {local_file_path}")
         model = whisper.load_model("large").cuda()
 
-        # Use mixed precision to reduce memory usage
-        with torch.cuda.amp.autocast():
+        # Use the updated mixed precision context manager
+        with torch.amp.autocast('cuda'):
             result = model.transcribe(local_file_path, word_timestamps=True)
 
         # Save the transcription as a JSON file
@@ -459,25 +459,23 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled):
 def update_progress(video_id, percent_complete, table_name, error_message=None):
     """
     Update video processing progress in DynamoDB, including error messages.
+    If the item does not exist, it will be created.
     """
     try:
-        update_expression = "SET ProcessingStatus = :ProcessingStatus, updatedAt = :time"
-        expression_attribute_values = {
-            ':ProcessingStatus': {'S': str(percent_complete)},
-            ':time': {'S': datetime.utcnow().isoformat()}
+        # Define the item to be put or updated
+        item = {
+            'FileName': {'S': video_id},
+            'ProcessingStatus': {'S': str(percent_complete)},
+            'updatedAt': {'S': datetime.utcnow().isoformat()}
         }
 
         if error_message:
-            update_expression += ", ErrorMessage = :ErrorMessage"
-            expression_attribute_values[':ErrorMessage'] = {'S': error_message}
+            item['ErrorMessage'] = {'S': error_message}
 
-        dynamodb.update_item(
+        # Use PutItem to create or replace the item
+        dynamodb.put_item(
             TableName=table_name,
-            Key={
-                'FileName': {'S': video_id}
-            },
-            UpdateExpression=update_expression,
-            ExpressionAttributeValues=expression_attribute_values
+            Item=item
         )
         logging.info(f"Updated progress for {video_id}: {percent_complete}%")
         if error_message:
