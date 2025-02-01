@@ -449,29 +449,65 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled):
 
 def update_progress(video_id, percent_complete, table_name, error_message=None):
     """
-    Update video processing progress in DynamoDB, including error messages.
-    If the item does not exist, it will be created.
+    Update video processing progress in DynamoDB.
+    Creates item if it doesn't exist, updates if it does.
     """
     try:
-        # Define the item to be put or updated
-        item = {
-            'FileName': {'S': video_id},
-            'ProcessingStatus': {'S': str(percent_complete)},
-            'updatedAt': {'S': datetime.utcnow().isoformat()},
-            'CreatedDate': {'S': datetime.utcnow().isoformat()}
-        }
+        current_time = datetime.utcnow().isoformat()
+        
+        # Try to get the existing item first
+        try:
+            response = dynamodb.get_item(
+                TableName=table_name,
+                Key={
+                    'FileName': {'S': video_id}
+                }
+            )
+            
+            # If item exists, update it
+            if 'Item' in response:
+                update_expression = "SET ProcessingStatus = :status, updatedAt = :time"
+                expression_values = {
+                    ':status': {'S': str(percent_complete)},
+                    ':time': {'S': current_time}
+                }
+                
+                if error_message:
+                    update_expression += ", ErrorMessage = :error"
+                    expression_values[':error'] = {'S': error_message}
 
-        if error_message:
-            item['ErrorMessage'] = {'S': error_message}
+                dynamodb.update_item(
+                    TableName=table_name,
+                    Key={
+                        'FileName': {'S': video_id}
+                    },
+                    UpdateExpression=update_expression,
+                    ExpressionAttributeValues=expression_values
+                )
+            else:
+                # Item doesn't exist, create new item
+                item = {
+                    'FileName': {'S': video_id},
+                    'ProcessingStatus': {'S': str(percent_complete)},
+                    'CreatedDate': {'S': current_time},
+                    'updatedAt': {'S': current_time}
+                }
+                if error_message:
+                    item['ErrorMessage'] = {'S': error_message}
+                
+                dynamodb.put_item(
+                    TableName=table_name,
+                    Item=item
+                )
 
-        # Use PutItem to create or replace the item
-        dynamodb.put_item(
-            TableName=table_name,
-            Item=item
-        )
+        except dynamodb.exceptions.ResourceNotFoundException:
+            logging.error(f"Table {table_name} not found")
+            raise
+            
         logging.info(f"Updated progress for {video_id}: {percent_complete}%")
         if error_message:
             logging.info(f"Logged error for {video_id}: {error_message}")
+            
     except Exception as e:
         logging.error(f"Failed to update progress: {e}")
 
