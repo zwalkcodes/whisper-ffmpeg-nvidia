@@ -27,7 +27,8 @@ RUN pip3 install --no-cache-dir --upgrade pip setuptools wheel && \
     openai-whisper \
     ffmpeg-python \
     boto3 \
-    awscli
+    awscli \
+    vim
 
 # Set the working directory
 WORKDIR /app
