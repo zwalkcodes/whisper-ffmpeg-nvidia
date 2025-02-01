@@ -54,7 +54,6 @@ def poll_queue():
     for attempt in range(max_empty_attempts):
         logging.info(f"Polling attempt {attempt + 1}/{max_empty_attempts}")
         
-        # Try to get a message with visibility timeout
         response = sqs.receive_message(
             QueueUrl=QUEUE_URL,
             MaxNumberOfMessages=1,
@@ -64,42 +63,33 @@ def poll_queue():
         )
 
         if 'Messages' in response:
-            message = response['Messages'][0]
-            receipt_handle = message['ReceiptHandle']
-            try:
-                logging.info(f"Processing message: {message['MessageId']}")
-                set_termination_protection(True)
-                
-                # Process the message
-                process_message(message['Body'])
-
-                # Delete the message only after successful processing
-                sqs.delete_message(
-                    QueueUrl=QUEUE_URL,
-                    ReceiptHandle=receipt_handle
-                )
-                logging.info(f"Successfully processed and deleted message: {message['MessageId']}")
-                set_termination_protection(False)
-                
-                # Continue polling for more messages
-                continue
-                
-            except Exception as e:
-                logging.error(f"Error processing message: {e}")
-                set_termination_protection(False)
-                
-                # Delete the message even if processing failed
-                # This prevents infinite retry loops
+            for message in response['Messages']:
                 try:
+                    logging.info(f"Processing message: {message['MessageId']}")
+                    set_termination_protection(True)
+                    process_message(message['Body'])
+
+                    # Delete message after successful processing
                     sqs.delete_message(
                         QueueUrl=QUEUE_URL,
-                        ReceiptHandle=receipt_handle
+                        ReceiptHandle=message['ReceiptHandle']
                     )
-                    logging.info(f"Deleted failed message: {message['MessageId']}")
-                except Exception as delete_error:
-                    logging.error(f"Failed to delete message: {delete_error}")
-                
-                raise
+                    logging.info(f"Successfully processed and deleted message: {message['MessageId']}")
+                except Exception as e:
+                    logging.error(f"Error processing message: {e}")
+                    
+                    # Delete the failed message to prevent infinite retries
+                    try:
+                        sqs.delete_message(
+                            QueueUrl=QUEUE_URL,
+                            ReceiptHandle=message['ReceiptHandle']
+                        )
+                        logging.info(f"Deleted failed message: {message['MessageId']}")
+                    except Exception as delete_error:
+                        logging.error(f"Failed to delete failed message: {delete_error}")
+                        
+                finally:
+                    set_termination_protection(False)
         else:
             logging.info(f"No messages found (attempt {attempt + 1}/{max_empty_attempts})")
             if attempt < max_empty_attempts - 1:
