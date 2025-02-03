@@ -131,7 +131,7 @@ def process_message(message_body):
             # Validate required fields
             for field in required_fields:
                 if field not in message_data:
-                    raise ValueError(f"Missing field: {field}")
+                    raise ValueError(f"Missing required field: {field}")
             
             process_video(
                 message_data['S3_BUCKET'],
@@ -252,7 +252,7 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled):
         target_ratio = 16 / 9
         
         if abs(actual_ratio - target_ratio) > 0.01:
-            raise ValueError(f"Not 16:9.")
+            raise ValueError(f"Input video is not in 16:9 aspect ratio.")
         
         print(f"Aspect ratio check passed: {width}x{height} = {actual_ratio:.3f} ≈ 16:9")
 
