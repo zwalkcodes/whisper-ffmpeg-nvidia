@@ -300,37 +300,37 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
                     "name": "UHD-H264",
                     "size": "3840x2160",
                     "video_codec": "h264_nvenc",
-                    "video_opts": "-preset slow -rc vbr_hq -qmin 0 -qmax 28 -b:v 12M -profile:v main",
-                    "bitrate": "12000k",
-                    'codec': 'avc1.640028',
-                    "audio_opts": "-c:a aac -b:a 192k"
+                    "video_opts": "-preset slow -rc constqp -cq:v 21 -qmin 19 -qmax 26 -maxrate 10M -bufsize 10M -profile:v main",
+                    "bitrate": "10000k",
+                    "codec": "avc1.640028",
+                    "audio_opts": "-c:a aac -b:a 128k"
                 },
                 {
                     "name": "1080P-H264",
                     "size": "1920x1080",
                     "video_codec": "h264_nvenc",
-                    "video_opts": "-preset slow -rc vbr_hq -qmin 0 -qmax 28 -b:v 6M -profile:v main",
+                    "video_opts": "-preset slow -rc constqp -cq:v 22 -qmin 19 -qmax 28 -maxrate 6M -bufsize 6M -profile:v main",
                     "bitrate": "6000k",
-                    'codec': 'avc1.640028',
-                    "audio_opts": "-c:a aac -b:a 192k"
+                    "codec": "avc1.640028",
+                    "audio_opts": "-c:a aac -b:a 128k"
                 },
                 {
                     "name": "720P-H264",
                     "size": "1280x720",
                     "video_codec": "h264_nvenc",
-                    "video_opts": "-preset slow -rc vbr_hq -qmin 0 -qmax 28 -b:v 4M -profile:v main",
+                    "video_opts": "-preset slow -rc constqp -cq:v 23 -qmin 20 -qmax 30 -maxrate 4M -bufsize 4M -profile:v main",
                     "bitrate": "4000k",
-                    'codec': 'avc1.64001f',
-                    "audio_opts": "-c:a aac -b:a 192k"
+                    "codec": "avc1.64001f",
+                    "audio_opts": "-c:a aac -b:a 128k"
                 },
                 {
                     "name": "540P-H264",
                     "size": "960x540",
                     "video_codec": "h264_nvenc",
-                    "video_opts": "-preset slow -rc vbr_hq -qmin 0 -qmax 28 -b:v 2M -profile:v main",
+                    "video_opts": "-preset slow -rc constqp -cq:v 24 -qmin 21 -qmax 32 -maxrate 2.5M -bufsize 2.5M -profile:v main",
                     "bitrate": "2500k",
-                    'codec': 'avc1.64001f',
-                    "audio_opts": "-c:a aac -b:a 192k"
+                    "codec": "avc1.64001f",
+                    "audio_opts": "-c:a aac -b:a 128k"
                 }
             ]
 
@@ -368,13 +368,12 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
                 cmd = (
                     f'ffmpeg -y -i {local_input} '
                     f'-c:v {variant["video_codec"]} {variant["video_opts"]} '
-                    f'-maxrate {variant["bitrate"]} -bufsize {int(1.5 * int(variant["bitrate"].replace("k", "000")))} '
                     f'-vf scale={variant["size"].replace("x", ":")} '
                     f'{variant["audio_opts"]} '
                     f'-g {keyframe_interval} -keyint_min {keyframe_interval} '
-                    f'-sc_threshold 0 '
+                    f'-sc_threshold 40 '
                     f'-f hls '
-                    f'-hls_time 6 '
+                    f'-hls_time 10 '
                     f'-hls_playlist_type vod '
                     f'-hls_segment_filename "{work_dir}/{base_name}-{variant["name"]}-%03d.ts" '
                     f'{variant_playlist}'
