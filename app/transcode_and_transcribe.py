@@ -137,7 +137,8 @@ def process_message(message_body):
                 message_data['S3_BUCKET'],
                 message_data['INPUT_PATH'],
                 message_data['VIDEO_TABLE'],  # Pass VIDEO_TABLE to process_video
-                uhd_enabled  # Pass UHD_ENABLED to process_video
+                uhd_enabled,  # Pass UHD_ENABLED to process_video
+                message_data.get('INCLUDE_DOWNLOAD', False)  # Pass INCLUDE_DOWNLOAD to process_video
             )     
         except json.JSONDecodeError as e:
             logging.error(f"Failed to decode message body: {e}")
@@ -211,7 +212,7 @@ def get_frame_rate(input_file):
     
     return frame_rate
 
-def process_video(s3_bucket, input_path, video_table, uhd_enabled):
+def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_download=False):
     """
     Process the video using the provided parameters.
     """
@@ -226,18 +227,10 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled):
         base_name = os.path.splitext(os.path.basename(input_path))[0]
         transcoding_path = f"s3://{s3_bucket}/transcoding_samples/"
         transcription_path = f"s3://{s3_bucket}/transcriptions/{base_name}.json"
-        
-        # Define progress steps
-        progress_steps = {
-            'DOWNLOAD_COMPLETED': 10,
-            'AUDIO_PROCESSING_COMPLETED': 20,
-            'VIDEO_PROCESSING_COMPLETED': 70,
-            'PLAYLIST_CREATION_COMPLETED': 90,
-            'UPLOAD_COMPLETED': 100
-        }
+        download_path = f"s3://{s3_bucket}/downloads/{os.path.basename(input_path)}"
 
         local_input = download_from_s3(input_path)
-        update_progress(input_key, progress_steps['DOWNLOAD_COMPLETED'], video_table)
+        update_progress(input_key, 10, video_table)
 
         # Get video metadata
         metadata = get_video_metadata(local_input)
@@ -299,7 +292,7 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled):
                 logging.error("S3 upload failed: %s", e)
                 raise e
          
-            update_progress(input_key, progress_steps['AUDIO_PROCESSING_COMPLETED'], video_table)
+            update_progress(input_key, 20, video_table)
             
             # Define video variants with only H.264
             variants = [
@@ -367,8 +360,8 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled):
                 m3u8_playlists.append(variant_playlist_m3u8)
                 
                 # Calculate progress for this variant
-                variant_progress = progress_steps['AUDIO_PROCESSING_COMPLETED'] + \
-                                 ((progress_steps['PLAYLIST_CREATION_COMPLETED'] - progress_steps['AUDIO_PROCESSING_COMPLETED']) * 
+                variant_progress = 20 + \
+                                 ((90 - 20) * 
                                   (idx + 1) / total_variants)
                 
                 logging.info(f"Processing variant {idx + 1}/{total_variants}: {variant['name']}")
@@ -404,10 +397,15 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled):
                 create_master_playlist(uhd_playlist_file, uhd_variants + non_uhd_variants, m3u8_playlists, frame_rate, base_name)
 
             # Send status event: Playlist creation completed
-            update_progress(input_key, progress_steps['PLAYLIST_CREATION_COMPLETED'], video_table)
+            update_progress(input_key, 90, video_table)
        
-            # Delete the input video file
-            os.remove(local_input)
+            # Upload or delete the local input based on INCLUDE_DOWNLOAD
+            if include_download:
+                logging.info(f"Uploading local input to downloads folder: {download_path}")
+                upload_to_s3(local_input, download_path)
+            else:
+                logging.info(f"Deleting local input: {local_input}")
+                os.remove(local_input)
 
             # Upload all segments and manifests to S3
             for root, _, files in os.walk(work_dir):
@@ -417,7 +415,7 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled):
                     upload_to_s3(local_file, s3_key)
 
             # Send status event: Upload completed
-            update_progress(input_key, progress_steps['UPLOAD_COMPLETED'], video_table)
+            update_progress(input_key, 100, video_table)
 
             # Clean up
             subprocess.run(f'rm -rf {work_dir}/*', shell=True)
@@ -458,7 +456,7 @@ def update_progress(video_id, percent_complete, table_name, error_message=None):
             if 'Item' in response:
                 update_expression = "SET ProcessingStatus = :status, UpdatedAt = :time"
                 expression_values = {
-                    ':status': {'S': str(percent_complete)},
+                    ':status': {'S': str(percent_complete) if not error_message else "ERROR"},
                     ':time': {'S': current_time}
                 }
                 
@@ -478,7 +476,7 @@ def update_progress(video_id, percent_complete, table_name, error_message=None):
                 # Item doesn't exist, create new item
                 item = {
                     'FileName': {'S': video_id},
-                    'ProcessingStatus': {'S': str(percent_complete)},
+                    'ProcessingStatus': {'S': "ERROR" if error_message else str(percent_complete)},
                     'CreatedDate': {'S': current_time},
                     'UpdatedAt': {'S': current_time}
                 }
