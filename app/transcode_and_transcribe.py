@@ -294,14 +294,14 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
          
             update_progress(input_key, 20, video_table)
             
-            # Define video variants with only H.264
+            # Define video variants with vbr_hq for good quality and bandwidth
             variants = [
                 {
                     "name": "UHD-H264",
                     "size": "3840x2160",
                     "video_codec": "h264_nvenc",
-                    "video_opts": "-preset slow -rc constqp -cq:v 21 -qmin 19 -qmax 26 -maxrate 10M -bufsize 10M -profile:v main",
-                    "bitrate": "10000k",
+                    "video_opts": "-preset slow -rc vbr_hq -b:v 8M -cq:v 21 -qmin 19 -qmax 26 -maxrate 8M -bufsize 16M -profile:v main",
+                    "bitrate": "8M",  # Estimated bandwidth
                     "codec": "avc1.640028",
                     "audio_opts": "-c:a aac -b:a 128k"
                 },
@@ -309,8 +309,8 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
                     "name": "1080P-H264",
                     "size": "1920x1080",
                     "video_codec": "h264_nvenc",
-                    "video_opts": "-preset slow -rc constqp -cq:v 22 -qmin 19 -qmax 28 -maxrate 6M -bufsize 6M -profile:v main",
-                    "bitrate": "6000k",
+                    "video_opts": "-preset slow -rc vbr_hq -b:v 5M -cq:v 22 -qmin 19 -qmax 28 -maxrate 5M -bufsize 10M -profile:v main",
+                    "bitrate": "5M",  # Estimated bandwidth
                     "codec": "avc1.640028",
                     "audio_opts": "-c:a aac -b:a 128k"
                 },
@@ -318,8 +318,8 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
                     "name": "720P-H264",
                     "size": "1280x720",
                     "video_codec": "h264_nvenc",
-                    "video_opts": "-preset slow -rc constqp -cq:v 23 -qmin 20 -qmax 30 -maxrate 4M -bufsize 4M -profile:v main",
-                    "bitrate": "4000k",
+                    "video_opts": "-preset slow -rc vbr_hq -b:v 3M -cq:v 23 -qmin 20 -qmax 30 -maxrate 3M -bufsize 6M -profile:v main",
+                    "bitrate": "3M",  # Estimated bandwidth
                     "codec": "avc1.64001f",
                     "audio_opts": "-c:a aac -b:a 128k"
                 },
@@ -327,8 +327,8 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
                     "name": "540P-H264",
                     "size": "960x540",
                     "video_codec": "h264_nvenc",
-                    "video_opts": "-preset slow -rc constqp -cq:v 24 -qmin 21 -qmax 32 -maxrate 2.5M -bufsize 2.5M -profile:v main",
-                    "bitrate": "2500k",
+                    "video_opts": "-preset slow -rc vbr_hq -b:v 2.5M -cq:v 24 -qmin 21 -qmax 32 -maxrate 2.5M -bufsize 5M -profile:v main",
+                    "bitrate": "2.5M",  # Estimated bandwidth
                     "codec": "avc1.64001f",
                     "audio_opts": "-c:a aac -b:a 128k"
                 }
@@ -505,7 +505,7 @@ def create_master_playlist(file_path, variants, m3u8_playlists, frame_rate, base
         f.write("#EXT-X-INDEPENDENT-SEGMENTS\n")
         
         for variant, variant_playlist_m3u8 in zip(variants, m3u8_playlists):
-            numeric_bitrate = variant["bitrate"].replace("k", "000")
+            numeric_bitrate = variant["bitrate"].replace("M", "000")
             average_bandwidth = int(numeric_bitrate) // 2
             combined_codecs = f'{variant["codec"]},mp4a.40.2'
 
