@@ -59,9 +59,14 @@ The transcode script listens for messages from an SQS queue to initiate processi
 ### Message Format
 
 Messages sent to the SQS queue should be in JSON format, including:
-- `bucket`: The S3 bucket name where the video is stored.
-- `key`: The S3 key (path) to the video file.
-- `output_formats`: Desired output formats and resolutions.
+
+- `s3_bucket`: The S3 bucket name where the video is stored.
+- `input_path`: The S3 key (path) to the video file.
+- `video_table`: The name of the video table for tracking processing status.
+- `uhd_enabled`: A boolean indicating if UHD processing is enabled.
+
+Optional:
+- `include_download`: A boolean indicating if the local input should be uploaded to a downloads folder or deleted after processing.
 
 ### Processing Workflow
 
