@@ -327,8 +327,8 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
                     "name": "540P-H264",
                     "size": "960x540",
                     "video_codec": "h264_nvenc",
-                    "video_opts": "-preset slow -rc vbr_hq -b:v 2.5M -cq:v 24 -qmin 21 -qmax 32 -maxrate 2.5M -bufsize 5M -profile:v main",
-                    "bitrate": "2.5M",  # Estimated bandwidth
+                    "video_opts": "-preset slow -rc vbr_hq -b:v 2M -cq:v 24 -qmin 21 -qmax 32 -maxrate 2M -bufsize 5M -profile:v main",
+                    "bitrate": "2M",  # Estimated bandwidth
                     "codec": "avc1.64001f",
                     "audio_opts": "-c:a aac -b:a 128k"
                 }
