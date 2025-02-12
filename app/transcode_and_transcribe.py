@@ -300,25 +300,25 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
                     "name": "UHD-H264",
                     "size": "3840x2160",
                     "video_codec": "h264_nvenc",
-                    "video_opts": "-preset slow -rc vbr_hq -b:v 12M -cq:v 20 -qmin 19 -qmax 26 -maxrate 15M -bufsize 30M -profile:v main",
+                    "video_opts": "-preset slow -rc vbr_hq -cq:v 20 -maxrate 12M -bufsize 24M -profile:v main",
                     "bitrate": "12M",  # Estimated bandwidth
                     "codec": "avc1.640028",
-                    "audio_opts": "-c:a aac -b:a 128k"
+                    "audio_opts": "-c:a aac -b:a 256k"
                 },
                 {
                     "name": "1080P-H264",
                     "size": "1920x1080",
                     "video_codec": "h264_nvenc",
-                    "video_opts": "-preset slow -rc vbr_hq -b:v 5M -cq:v 21 -qmin 19 -qmax 28 -maxrate 6M -bufsize 12M -profile:v main",
-                    "bitrate": "5M",  # Estimated bandwidth
+                    "video_opts": "-preset slow -rc vbr_hq -cq:v 21 -maxrate 7M -bufsize 14M -profile:v main",
+                    "bitrate": "7M",  # Estimated bandwidth
                     "codec": "avc1.640028",
-                    "audio_opts": "-c:a aac -b:a 128k"
+                    "audio_opts": "-c:a aac -b:a 256k"
                 },
                 {
                     "name": "720P-H264",
                     "size": "1280x720",
                     "video_codec": "h264_nvenc",
-                    "video_opts": "-preset slow -rc vbr_hq -b:v 3M -cq:v 22 -qmin 20 -qmax 30 -maxrate 4M -bufsize 8M -profile:v main",
+                    "video_opts": "-preset slow -rc vbr_hq -cq:v 23 -maxrate 3M -bufsize 6M -profile:v main",
                     "bitrate": "3M",  # Estimated bandwidth
                     "codec": "avc1.64001f",
                     "audio_opts": "-c:a aac -b:a 128k"
@@ -327,7 +327,7 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
                     "name": "540P-H264",
                     "size": "960x540",
                     "video_codec": "h264_nvenc",
-                    "video_opts": "-preset slow -rc vbr_hq -b:v 2M -cq:v 23 -qmin 21 -qmax 32 -maxrate 2M -bufsize 5M -profile:v main",
+                    "video_opts": "-preset slow -rc vbr_hq -cq:v 24 -maxrate 2M -bufsize 5M -profile:v main",
                     "bitrate": "2M",  # Estimated bandwidth
                     "codec": "avc1.64001f",
                     "audio_opts": "-c:a aac -b:a 128k"
