@@ -300,8 +300,8 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
                     "name": "UHD-H264",
                     "size": "3840x2160",
                     "video_codec": "h264_nvenc",
-                    "video_opts": "-preset slow -rc vbr_hq -cq:v 20 -maxrate 12M -bufsize 24M -profile:v main",
-                    "bitrate": "12M",  # Estimated bandwidth
+                    "video_opts": "-preset slow -rc vbr_hq -cq:v 19 -maxrate 15M -bufsize 30M -profile:v main",
+                    "bitrate": "15M",  # Estimated bandwidth
                     "codec": "avc1.640028",
                     "audio_opts": "-c:a aac -b:a 256k"
                 },
@@ -309,8 +309,8 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
                     "name": "1080P-H264",
                     "size": "1920x1080",
                     "video_codec": "h264_nvenc",
-                    "video_opts": "-preset slow -rc vbr_hq -cq:v 21 -maxrate 7M -bufsize 14M -profile:v main",
-                    "bitrate": "7M",  # Estimated bandwidth
+                    "video_opts": "-preset slow -rc vbr_hq -cq:v 20 -maxrate 10M -bufsize 20M -profile:v main",
+                    "bitrate": "10M",  # Estimated bandwidth
                     "codec": "avc1.640028",
                     "audio_opts": "-c:a aac -b:a 256k"
                 },
@@ -318,8 +318,8 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
                     "name": "720P-H264",
                     "size": "1280x720",
                     "video_codec": "h264_nvenc",
-                    "video_opts": "-preset slow -rc vbr_hq -cq:v 23 -maxrate 3M -bufsize 6M -profile:v main",
-                    "bitrate": "3M",  # Estimated bandwidth
+                    "video_opts": "-preset slow -rc vbr_hq -cq:v 23 -maxrate 7M -bufsize 14M -profile:v main",
+                    "bitrate": "7M",  # Estimated bandwidth
                     "codec": "avc1.64001f",
                     "audio_opts": "-c:a aac -b:a 128k"
                 },
