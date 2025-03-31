@@ -49,7 +49,7 @@ def poll_queue():
     """
     max_empty_attempts = 3
     wait_time = 20  # seconds to wait for each poll
-    visibility_timeout = 7200  # 2 hours - should be longer than max processing time
+    visibility_timeout = 43200  # 12 hours - maximum allowed by SQS
 
     for attempt in range(max_empty_attempts):
         logging.info(f"Polling attempt {attempt + 1}/{max_empty_attempts}")
