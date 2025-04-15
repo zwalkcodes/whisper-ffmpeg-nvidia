@@ -516,5 +516,14 @@ def create_master_playlist(file_path, variants, m3u8_playlists, frame_rate, base
             f.write(f'#EXT-X-STREAM-INF:BANDWIDTH={numeric_bitrate},AVERAGE-BANDWIDTH={average_bandwidth},RESOLUTION={variant["size"]},CODECS="{combined_codecs}",FRAME-RATE={frame_rate},CLOSED-CAPTIONS=NONE\n')
             f.write(f'{variant_playlist_m3u8}\n')
 
+def str2bool(val):
+    return str(val).lower() in ("yes", "true", "1")
+
 if __name__ == "__main__":
-    poll_queue()
+    s3_bucket = os.environ["S3_BUCKET"]
+    input_path = os.environ["INPUT_PATH"]
+    video_table = os.environ["VIDEO_TABLE"]
+    uhd_enabled = str2bool(os.environ.get("UHD_ENABLED", "false"))
+    include_download = str2bool(os.environ.get("INCLUDE_DOWNLOAD", "false"))
+
+    process_video(s3_bucket, input_path, video_table, uhd_enabled, include_download)
