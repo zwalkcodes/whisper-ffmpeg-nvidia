@@ -6,6 +6,7 @@ from datetime import datetime
 import whisper
 import logging
 import requests
+import torch
 
 region = os.getenv('AWS_REGION', 'us-west-1')  # Default to 'us-west-1' if not set
 
@@ -27,6 +28,16 @@ logging.basicConfig(
         logging.StreamHandler()  # This sends logs to console
     ]
 )
+
+def optimize_gpu():
+    if torch.cuda.is_available():
+        # Enable TF32 for faster processing on Ampere GPUs
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        
+        # Set memory allocation strategy
+        torch.cuda.set_per_process_memory_fraction(0.9)  # Use 90% of GPU memory
+        torch.cuda.empty_cache()
 
 def set_termination_protection(enabled):
     """
@@ -176,13 +187,29 @@ def get_video_metadata(input_path):
     return metadata['streams'][0]
 
 def transcribe_audio(local_file_path, output_file):
-    """Use Whisper to transcribe the audio file."""
+    """Use Whisper to transcribe the audio file with optimized settings."""
     try:
         logging.info(f"Loading Whisper model and starting transcription for {local_file_path}")
+        
+        # Use medium model for initial fast pass
+        # The medium model is ~4x faster than large with ~1% lower accuracy
         model = whisper.load_model("medium").cuda()
-        result = model.transcribe(local_file_path, word_timestamps=True)
+        
+        # Optimize model for inference
+        model.eval()
+        with torch.inference_mode():
+            # Use efficient attention
+            model.encoder.use_flash_attention = True if hasattr(model.encoder, 'use_flash_attention') else False
+            
+            # Optimize batch size and chunk size for GPU memory
+            result = model.transcribe(
+                local_file_path,
+                word_timestamps=True,
+                batch_size=16,        # Increase batch size for faster processing
+                compute_type="float16" # Use half precision for faster processing
+            )
 
-        # Save the transcription as a JSON file
+        # Save the transcription
         with open(output_file, 'w') as f:
             json.dump(result, f, indent=4)
         logging.info(f"Saved transcription to {output_file}")
@@ -269,7 +296,11 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
                     f'-c:a aac -b:a 256k '
                     f'{audio_output}'
                 )
-                subprocess.run(audio_cmd, shell=True, check=True)
+                try:
+                    subprocess.run(audio_cmd, shell=True, check=True, capture_output=True, text=True)
+                except subprocess.CalledProcessError as e:
+                    logging.error(f"FFmpeg command failed:\nOutput: {e.output}\nError: {e.stderr}")
+                    raise
                 logging.info("Audio extraction completed")
 
             # Transcribe the audio file
@@ -382,7 +413,11 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
                     f'-hls_segment_filename "{work_dir}/{base_name}-{variant["name"]}-%03d.ts" '
                     f'{variant_playlist}'
                 )
-                subprocess.run(cmd, shell=True, check=True)
+                try:
+                    subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True)
+                except subprocess.CalledProcessError as e:
+                    logging.error(f"FFmpeg command failed:\nOutput: {e.output}\nError: {e.stderr}")
+                    raise
                 
                 # Update progress after each variant is processed
                 update_progress(input_key, int(variant_progress), video_table)
@@ -519,11 +554,22 @@ def create_master_playlist(file_path, variants, m3u8_playlists, frame_rate, base
 def str2bool(val):
     return str(val).lower() in ("yes", "true", "1")
 
+def log_gpu_usage():
+    try:
+        result = subprocess.run('nvidia-smi', shell=True, capture_output=True, text=True)
+        logging.info(f"GPU Usage:\n{result.stdout}")
+    except Exception as e:
+        logging.error(f"Failed to get GPU usage: {e}")
+
 if __name__ == "__main__":
+    optimize_gpu()
     s3_bucket = os.environ["S3_BUCKET"]
     input_path = os.environ["INPUT_PATH"]
     video_table = os.environ["VIDEO_TABLE"]
     uhd_enabled = str2bool(os.environ.get("UHD_ENABLED", "false"))
     include_download = str2bool(os.environ.get("INCLUDE_DOWNLOAD", "false"))
+
+    logging.info("FFmpeg GPU capabilities:")
+    subprocess.run('ffmpeg -hide_banner -hwaccels', shell=True, check=True)
 
     process_video(s3_bucket, input_path, video_table, uhd_enabled, include_download)
