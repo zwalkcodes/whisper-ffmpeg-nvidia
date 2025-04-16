@@ -179,7 +179,7 @@ def transcribe_audio(local_file_path, output_file):
     """Use Whisper to transcribe the audio file."""
     try:
         logging.info(f"Loading Whisper model and starting transcription for {local_file_path}")
-        model = whisper.load_model("large").cuda()
+        model = whisper.load_model("medium").cuda()
         result = model.transcribe(local_file_path, word_timestamps=True)
 
         # Save the transcription as a JSON file
