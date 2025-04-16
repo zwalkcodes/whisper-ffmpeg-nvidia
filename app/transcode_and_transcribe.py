@@ -187,27 +187,15 @@ def get_video_metadata(input_path):
     return metadata['streams'][0]
 
 def transcribe_audio(local_file_path, output_file):
-    """Use Whisper to transcribe the audio file with optimized settings."""
+    """Use Whisper to transcribe the audio file."""
     try:
         logging.info(f"Loading Whisper model and starting transcription for {local_file_path}")
         
-        # Use medium model for initial fast pass
-        # The medium model is ~4x faster than large with ~1% lower accuracy
+        # Load the model
         model = whisper.load_model("medium").cuda()
         
-        # Optimize model for inference
-        model.eval()
-        with torch.inference_mode():
-            # Use efficient attention if available
-            if hasattr(model.encoder, 'use_flash_attention'):
-                model.encoder.use_flash_attention = True
-            
-            # Transcribe with word timestamps and fp16 for faster processing
-            result = model.transcribe(
-                local_file_path,
-                word_timestamps=True,
-                fp16=True  # Use half precision for faster processing
-            )
+        # Transcribe the audio
+        result = model.transcribe(local_file_path, word_timestamps=True)
 
         # Save the transcription
         with open(output_file, 'w') as f:
