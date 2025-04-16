@@ -191,11 +191,20 @@ def transcribe_audio(local_file_path, output_file):
     try:
         logging.info(f"Loading Whisper model and starting transcription for {local_file_path}")
         
+        # Log GPU usage before loading the model
+        log_gpu_usage()
+        
         # Load the model
         model = whisper.load_model("medium").cuda()
         
+        # Log GPU usage after loading the model
+        log_gpu_usage()
+        
         # Transcribe the audio
         result = model.transcribe(local_file_path, word_timestamps=True)
+
+        # Log GPU usage after transcription
+        log_gpu_usage()
 
         # Save the transcription
         with open(output_file, 'w') as f:
@@ -235,6 +244,9 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
     update_progress(input_key, 0, video_table)  # Starting progress
 
     try:
+        # Log GPU usage before starting video processing
+        log_gpu_usage()
+
         # Use the parameters as needed in your process_video logic
         logging.info(f"Starting video processing for bucket: {s3_bucket}, key: {input_key}")
 
@@ -290,6 +302,9 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
                     logging.error(f"FFmpeg command failed:\nOutput: {e.output}\nError: {e.stderr}")
                     raise
                 logging.info("Audio extraction completed")
+
+            # Log GPU usage after audio extraction
+            log_gpu_usage()
 
             # Transcribe the audio file
             transcription_output = f"{work_dir}/{base_name}.json"
@@ -363,6 +378,13 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
                 if int(v['size'].split('x')[0]) <= width and int(v['size'].split('x')[1]) <= height
             ]
 
+            # If no variants are available, log an error and update the database
+            if not filtered_variants:
+                error_message = "No suitable video variants for processing due to low resolution."
+                logging.error(error_message)
+                update_progress(input_key, 0, video_table, error_message=error_message)
+                raise ValueError(error_message)
+
             # If UHD is not enabled, remove UHD variants
             if not uhd_enabled:
                 filtered_variants = [v for v in filtered_variants if "UHD" not in v['name']]
@@ -410,6 +432,9 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
                 # Update progress after each variant is processed
                 update_progress(input_key, int(variant_progress), video_table)
                 logging.info(f"Completed variant {variant['name']} ({idx + 1}/{total_variants})")
+
+            # Log GPU usage after video processing
+            log_gpu_usage()
 
             # Create the master playlist
             master_playlist_file = f"{work_dir}/{base_name}.m3u8"
