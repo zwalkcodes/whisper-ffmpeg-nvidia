@@ -276,6 +276,14 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
         
         print(f"Aspect ratio check passed: {width}x{height} = {actual_ratio:.3f} ≈ 16:9")
 
+        # Check if resolution is too small
+        min_width, min_height = 1920, 1080  # Minimum resolution for 1080p
+        if width < min_width or height < min_height:
+            error_message = "Resolution too small for processing. Minimum required is 1080p."
+            logging.error(error_message)
+            update_progress(input_key, 0, video_table, error_message=error_message)
+            raise ValueError(error_message)
+
         # Create temporary working directory
         work_dir = f"/tmp"
         os.makedirs(work_dir, exist_ok=True)
