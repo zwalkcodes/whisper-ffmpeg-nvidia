@@ -198,15 +198,15 @@ def transcribe_audio(local_file_path, output_file):
         # Optimize model for inference
         model.eval()
         with torch.inference_mode():
-            # Use efficient attention
-            model.encoder.use_flash_attention = True if hasattr(model.encoder, 'use_flash_attention') else False
+            # Use efficient attention if available
+            if hasattr(model.encoder, 'use_flash_attention'):
+                model.encoder.use_flash_attention = True
             
-            # Optimize batch size and chunk size for GPU memory
+            # Transcribe with word timestamps and fp16 for faster processing
             result = model.transcribe(
                 local_file_path,
                 word_timestamps=True,
-                batch_size=16,        # Increase batch size for faster processing
-                compute_type="float16" # Use half precision for faster processing
+                fp16=True  # Use half precision for faster processing
             )
 
         # Save the transcription
