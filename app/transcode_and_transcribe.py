@@ -294,7 +294,7 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
         if width < min_width or height < min_height:
             error_message = "LOW RESOLUTION! Resolution is less than 1080p."
             logging.error(error_message)
-            update_progress(input_key, 0, video_table, error_message=error_message)
+            update_progress(input_key, 10, video_table, error_message=error_message)
 
         # Create temporary working directory
         work_dir = f"/tmp"
@@ -303,6 +303,7 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
         try:
             # Check audio fidelity
             original_bitrate = get_audio_bitrate(local_input)
+            logging.info(f"Original audio bitrate: {original_bitrate} bits per second")
             audio_bitrate = min(original_bitrate, 256000)  # Use the lower of the original or 256K
 
             # Process audio separately (high quality)
@@ -542,15 +543,25 @@ def update_progress(video_id, percent_complete, table_name, error_message=None):
             
             # If item exists, update it
             if 'Item' in response:
+                existing_error = response['Item'].get('ErrorMessage', {}).get('S', '')
+                low_res_warning = "LOW RESOLUTION! Resolution is less than 1080p."
+                new_error_message = existing_error
+
+                # Preserve the low-resolution warning
+                if low_res_warning in existing_error:
+                    new_error_message = existing_error
+                elif error_message:
+                    new_error_message = error_message
+
                 update_expression = "SET ProcessingStatus = :status, UpdatedAt = :time"
                 expression_values = {
                     ':status': {'S': str(percent_complete) if not error_message else "ERROR"},
                     ':time': {'S': current_time}
                 }
                 
-                if error_message:
+                if new_error_message:
                     update_expression += ", ErrorMessage = :error"
-                    expression_values[':error'] = {'S': error_message}
+                    expression_values[':error'] = {'S': new_error_message}
 
                 dynamodb.update_item(
                     TableName=table_name,
