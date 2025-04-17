@@ -394,12 +394,8 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
                     "segment_duration": 6,
                     "codec": "avc1.64001f",
                     "audio_opts": "-c:a aac -b:a 128k"
-                }
-            ]
-
-            # Add a low-resolution variant for videos with resolution <= 640x360
-            if width <= 640 and height <= 360:
-                variants.append({
+                },
+                {
                     "name": "360P-H264",
                     "size": "640x360",
                     "video_codec": "h264_nvenc",
@@ -408,7 +404,8 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
                     "segment_duration": 4,
                     "codec": "avc1.64001e",
                     "audio_opts": "-c:a aac -b:a 96k"
-                })
+                }
+            ]
 
             # Filter variants based on input resolution and H.265 support
             filtered_variants = [
