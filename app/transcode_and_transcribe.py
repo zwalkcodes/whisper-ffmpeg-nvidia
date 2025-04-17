@@ -236,6 +236,19 @@ def get_frame_rate(input_file):
     
     return frame_rate
 
+def get_audio_bitrate(input_file):
+    # Use ffprobe to extract the audio bitrate
+    cmd = [
+        'ffprobe', '-v', 'error', '-select_streams', 'a:0',
+        '-show_entries', 'stream=bit_rate',
+        '-of', 'default=noprint_wrappers=1:nokey=1',
+        input_file
+    ]
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"Failed to get audio bitrate: {result.stderr}")
+    return int(result.stdout.strip())
+
 def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_download=False):
     """
     Process the video using the provided parameters.
@@ -279,16 +292,19 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
         # Check if resolution is too small
         min_width, min_height = 1920, 1080  # Minimum resolution for 1080p
         if width < min_width or height < min_height:
-            error_message = "Resolution too small for processing. Minimum required is 1080p."
+            error_message = "LOW RESOLUTION! Resolution is less than 1080p."
             logging.error(error_message)
             update_progress(input_key, 0, video_table, error_message=error_message)
-            raise ValueError(error_message)
 
         # Create temporary working directory
         work_dir = f"/tmp"
         os.makedirs(work_dir, exist_ok=True)
         
         try:
+            # Check audio fidelity
+            original_bitrate = get_audio_bitrate(local_input)
+            audio_bitrate = min(original_bitrate, 256000)  # Use the lower of the original or 256K
+
             # Process audio separately (high quality)
             audio_output = f"{work_dir}/{base_name}-WAV.mp4"
 
@@ -301,7 +317,7 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
                     f'ffmpeg -y -hwaccel cuda -c:v h264_cuvid '
                     f'-i {local_input} '
                     f'-vn '
-                    f'-c:a aac -b:a 256k '
+                    f'-c:a aac -b:a {audio_bitrate} '
                     f'{audio_output}'
                 )
                 try:
@@ -379,6 +395,19 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
                     "audio_opts": "-c:a aac -b:a 128k"
                 }
             ]
+
+            # Add a low-resolution variant for videos with resolution <= 640x360
+            if width <= 640 and height <= 360:
+                variants.append({
+                    "name": "360P-H264",
+                    "size": "640x360",
+                    "video_codec": "h264_nvenc",
+                    "video_opts": "-preset slow -rc vbr_hq -b:v 1M -cq:v 25 -qmin 22 -qmax 34 -maxrate 1.5M -bufsize 3M -profile:v main",
+                    "bitrate": "1M",  # Estimated bandwidth
+                    "segment_duration": 4,
+                    "codec": "avc1.64001e",
+                    "audio_opts": "-c:a aac -b:a 96k"
+                })
 
             # Filter variants based on input resolution and H.265 support
             filtered_variants = [
