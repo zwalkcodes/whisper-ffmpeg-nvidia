@@ -553,9 +553,12 @@ def update_progress(video_id, percent_complete, table_name, error_message=None):
                 elif error_message:
                     new_error_message = error_message
 
+                # Determine the processing status
+                processing_status = "ERROR" if error_message and error_message != low_res_warning else str(percent_complete)
+
                 update_expression = "SET ProcessingStatus = :status, UpdatedAt = :time"
                 expression_values = {
-                    ':status': {'S': str(percent_complete) if not error_message else "ERROR"},
+                    ':status': {'S': processing_status},
                     ':time': {'S': current_time}
                 }
                 
@@ -575,7 +578,7 @@ def update_progress(video_id, percent_complete, table_name, error_message=None):
                 # Item doesn't exist, create new item
                 item = {
                     'FileName': {'S': video_id},
-                    'ProcessingStatus': {'S': "ERROR" if error_message else str(percent_complete)},
+                    'ProcessingStatus': {'S': "ERROR" if error_message and error_message != low_res_warning else str(percent_complete)},
                     'CreatedDate': {'S': current_time},
                     'UpdatedAt': {'S': current_time}
                 }
