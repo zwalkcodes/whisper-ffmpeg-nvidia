@@ -20,6 +20,7 @@ RUN apt-get update && apt-get upgrade -y \
 
 # Install Whisper and other Python packages
 RUN pip3 install --no-cache-dir --upgrade pip setuptools wheel && \
+    pip3 install --no-cache-dir "numpy<2" && \
     pip3 install --no-cache-dir \
     torch \
     torchvision \
