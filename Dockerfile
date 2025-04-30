@@ -24,6 +24,7 @@ RUN pip3 install --no-cache-dir --upgrade pip setuptools wheel && \
     torch \
     torchvision \
     --extra-index-url https://download.pytorch.org/whl/cu118 && \
+    pip3 install --no-cache-dir triton==2.0.0 && \
     pip3 install --no-cache-dir \
     openai-whisper \
     ffmpeg-python \
