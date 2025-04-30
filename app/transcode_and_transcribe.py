@@ -485,13 +485,14 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
             # Send status event: Playlist creation completed
             update_progress(input_key, 90, video_table)
        
-            # Upload or delete the local input based on INCLUDE_DOWNLOAD
+            # Upload to downloads folder if INCLUDE_DOWNLOAD is True
             if include_download:
                 logging.info(f"Uploading local input to downloads folder: {download_path}")
                 upload_to_s3(local_input, download_path)
-            else:
-                logging.info(f"Deleting local input: {local_input}")
-                os.remove(local_input)
+            
+            # Always delete the local input file after processing
+            logging.info(f"Deleting local input file: {local_input}")
+            os.remove(local_input)
 
             # Upload all segments and manifests to S3
             for root, _, files in os.walk(work_dir):
@@ -604,12 +605,20 @@ def create_master_playlist(file_path, variants, m3u8_playlists, frame_rate, base
         f.write("#EXT-X-VERSION:6\n")
         f.write("#EXT-X-INDEPENDENT-SEGMENTS\n")
         
+        # Add subtitle tracks (both off by default)
+        f.write('#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",DEFAULT=NO,FORCED=NO,'
+               f'LANGUAGE="en",URI="../subtitles/{base_name}_en.vtt"\n')
+        f.write('#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="Español",DEFAULT=NO,FORCED=NO,'
+               f'LANGUAGE="es",URI="../subtitles/{base_name}_es.vtt"\n')
+        
         for variant, variant_playlist_m3u8 in zip(variants, m3u8_playlists):
             numeric_bitrate = variant["bitrate"].replace("M", "000")
             average_bandwidth = int(numeric_bitrate) // 2
             combined_codecs = f'{variant["codec"]},mp4a.40.2'
 
-            f.write(f'#EXT-X-STREAM-INF:BANDWIDTH={numeric_bitrate},AVERAGE-BANDWIDTH={average_bandwidth},RESOLUTION={variant["size"]},CODECS="{combined_codecs}",FRAME-RATE={frame_rate},CLOSED-CAPTIONS=NONE\n')
+            f.write(f'#EXT-X-STREAM-INF:BANDWIDTH={numeric_bitrate},AVERAGE-BANDWIDTH={average_bandwidth},'
+                   f'RESOLUTION={variant["size"]},CODECS="{combined_codecs}",FRAME-RATE={frame_rate},'
+                   f'CLOSED-CAPTIONS=NONE,SUBTITLES="subs"\n')
             f.write(f'{variant_playlist_m3u8}\n')
 
 def str2bool(val):
