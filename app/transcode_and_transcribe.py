@@ -600,26 +600,36 @@ def update_progress(video_id, percent_complete, table_name, error_message=None):
         logging.error(f"Failed to update progress: {e}")
 
 def create_master_playlist(file_path, variants, m3u8_playlists, frame_rate, base_name):
-    with open(file_path, 'w') as f:
+    with open(file_path, "w") as f:
         f.write("#EXTM3U\n")
         f.write("#EXT-X-VERSION:6\n")
-        f.write("#EXT-X-INDEPENDENT-SEGMENTS\n")
-        
-        # Add subtitle tracks (both off by default)
-        f.write('#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",DEFAULT=NO,FORCED=NO,'
-               f'LANGUAGE="en",URI="../subtitles/{base_name}_en.vtt"\n')
-        f.write('#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="Español",DEFAULT=NO,FORCED=NO,'
-               f'LANGUAGE="es",URI="../subtitles/{base_name}_es.vtt"\n')
-        
-        for variant, variant_playlist_m3u8 in zip(variants, m3u8_playlists):
-            numeric_bitrate = variant["bitrate"].replace("M", "000")
-            average_bandwidth = int(numeric_bitrate) // 2
-            combined_codecs = f'{variant["codec"]},mp4a.40.2'
+        f.write("#EXT-X-INDEPENDENT-SEGMENTS\n\n")
 
-            f.write(f'#EXT-X-STREAM-INF:BANDWIDTH={numeric_bitrate},AVERAGE-BANDWIDTH={average_bandwidth},'
-                   f'RESOLUTION={variant["size"]},CODECS="{combined_codecs}",FRAME-RATE={frame_rate},'
-                   f'CLOSED-CAPTIONS=NONE,SUBTITLES="subs"\n')
-            f.write(f'{variant_playlist_m3u8}\n')
+        # --- Subtitles -----------------------------------------------------
+        subtitles = [("English", "en", False), ("Español", "es", False)]
+        for name, lang, is_default in subtitles:
+            default_flag = "YES" if is_default else "NO"
+            f.write(
+                '#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",'
+                f'NAME="{name}",LANGUAGE="{lang}",DEFAULT={default_flag},'
+                'AUTOSELECT=YES,FORCED=NO,'
+                f'URI="../subtitles/{base_name}_{lang}.vtt"\n'
+            )
+
+        # --- Variants ------------------------------------------------------
+        for variant, variant_playlist_m3u8 in zip(variants, m3u8_playlists):
+            # BANDWIDTH values must be bits-per-second integers
+            bps  = int(variant["bitrate"].rstrip("M")) * 1_000_000
+            avg  = int(bps * 0.8)
+            codecs = f'{variant["codec"]},mp4a.40.2'
+
+            f.write(
+                f'#EXT-X-STREAM-INF:BANDWIDTH={bps},AVERAGE-BANDWIDTH={avg},'
+                f'RESOLUTION={variant["size"]},CODECS="{codecs}",'
+                f'FRAME-RATE={frame_rate:.3f},CLOSED-CAPTIONS=NONE,'
+                'SUBTITLES="subs"\n'
+            )
+            f.write(f"{variant_playlist_m3u8}\n")
 
 def str2bool(val):
     return str(val).lower() in ("yes", "true", "1")
