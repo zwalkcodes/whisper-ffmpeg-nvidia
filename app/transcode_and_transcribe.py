@@ -8,13 +8,13 @@ import logging
 import requests
 import torch
 
-region = os.getenv('AWS_REGION', 'us-west-1')  # Default to 'us-west-1' if not set
+region = os.getenv('AWS_REGION', 'us-west-2')  # Default to 'us-west-1' if not set
 
 # Initialize AWS clients
 s3_client = boto3.client('s3', region_name=region)
 ec2 = boto3.client('ec2', region_name=region)
 sqs = boto3.client('sqs', region_name=region)
-dynamodb = boto3.client('dynamodb', region_name=region)
+dynamodb = boto3.client('dynamodb', region_name='us-west-1')
 
 INSTANCE_ID = requests.get('http://169.254.169.254/latest/meta-data/instance-id').text
 QUEUE_URL = os.environ.get("SQS_QUEUE_URL")
