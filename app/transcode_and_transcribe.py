@@ -600,36 +600,68 @@ def update_progress(video_id, percent_complete, table_name, error_message=None):
         logging.error(f"Failed to update progress: {e}")
 
 def create_master_playlist(file_path, variants, m3u8_playlists, frame_rate, base_name):
+    """
+    Writes:
+      • master playlist  (file_path)
+      • {base_name}_{lang}.m3u8 subtitle playlists (same dir as master)
+
+    Assumes the WebVTT files live at ../subtitles/{base_name}_{lang}.vtt
+    relative to the master playlist.
+    """
+    master_dir = os.path.dirname(file_path) or "."
+
+    # ---------- build master playlist lines ----------
+    master_lines = [
+        "#EXTM3U",
+        "#EXT-X-VERSION:6",
+        "#EXT-X-INDEPENDENT-SEGMENTS",
+        ""
+    ]
+
+    subtitles = [("English", "en", False), ("Español", "es", False)]
+    target_duration = 3600  # long enough for whole video
+
+    for name, lang, is_default in subtitles:
+        default_flag = "YES" if is_default else "NO"
+        vtt_path     = f"../subtitles/{base_name}_{lang}.vtt"
+        sub_m3u8     = f"{base_name}_{lang}.m3u8"
+        sub_m3u8_path = os.path.join(master_dir, sub_m3u8)
+
+        # ---- write subtitle playlist (.m3u8) ----
+        with open(sub_m3u8_path, "w") as sf:
+            sf.write("#EXTM3U\n")
+            sf.write("#EXT-X-VERSION:6\n")
+            sf.write(f"#EXT-X-TARGETDURATION:{target_duration}\n")
+            sf.write(f'#EXT-X-MAP:URI="{vtt_path}"\n')
+            sf.write(f"#EXTINF:{target_duration:.3f},\n")
+            sf.write(f"{vtt_path}\n")
+            sf.write("#EXT-X-ENDLIST\n")
+
+        # ---- add track reference to master ----
+        master_lines.append(
+            f'#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",'
+            f'NAME="{name}",LANGUAGE="{lang}",DEFAULT={default_flag},'
+            f'AUTOSELECT=YES,FORCED=NO,URI="{sub_m3u8}"'
+        )
+
+    # ---------- add video variants ----------
+    for variant, variant_playlist_m3u8 in zip(variants, m3u8_playlists):
+        bps = int(variant["bitrate"].rstrip("M")) * 1_000_000
+        avg = int(bps * 0.8)
+        codecs = f'{variant["codec"]},mp4a.40.2'
+
+        master_lines.append(
+            f'#EXT-X-STREAM-INF:BANDWIDTH={bps},AVERAGE-BANDWIDTH={avg},'
+            f'RESOLUTION={variant["size"]},CODECS="{codecs}",'
+            f'FRAME-RATE={frame_rate:.3f},CLOSED-CAPTIONS=NONE,'
+            'SUBTITLES="subs"'
+        )
+        master_lines.append(variant_playlist_m3u8)
+
+    # ---------- write master playlist ----------
     with open(file_path, "w") as f:
-        f.write("#EXTM3U\n")
-        f.write("#EXT-X-VERSION:6\n")
-        f.write("#EXT-X-INDEPENDENT-SEGMENTS\n\n")
-
-        # --- Subtitles -----------------------------------------------------
-        subtitles = [("English", "en", False), ("Español", "es", False)]
-        for name, lang, is_default in subtitles:
-            default_flag = "YES" if is_default else "NO"
-            f.write(
-                '#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",'
-                f'NAME="{name}",LANGUAGE="{lang}",DEFAULT={default_flag},'
-                'AUTOSELECT=YES,FORCED=NO,'
-                f'URI="../subtitles/{base_name}_{lang}.vtt"\n'
-            )
-
-        # --- Variants ------------------------------------------------------
-        for variant, variant_playlist_m3u8 in zip(variants, m3u8_playlists):
-            # BANDWIDTH values must be bits-per-second integers
-            bps  = int(variant["bitrate"].rstrip("M")) * 1_000_000
-            avg  = int(bps * 0.8)
-            codecs = f'{variant["codec"]},mp4a.40.2'
-
-            f.write(
-                f'#EXT-X-STREAM-INF:BANDWIDTH={bps},AVERAGE-BANDWIDTH={avg},'
-                f'RESOLUTION={variant["size"]},CODECS="{codecs}",'
-                f'FRAME-RATE={frame_rate:.3f},CLOSED-CAPTIONS=NONE,'
-                'SUBTITLES="subs"\n'
-            )
-            f.write(f"{variant_playlist_m3u8}\n")
+        f.write("\n".join(master_lines))
+        f.write("\n")
 
 def str2bool(val):
     return str(val).lower() in ("yes", "true", "1")
