@@ -5,19 +5,16 @@ import json
 from datetime import datetime
 import whisper
 import logging
-import requests
 import torch
+import mimetypes
+import pathlib
 
 region = os.getenv('AWS_REGION', 'us-west-2')  # Default to 'us-west-1' if not set
 
 # Initialize AWS clients
 s3_client = boto3.client('s3', region_name=region)
 ec2 = boto3.client('ec2', region_name=region)
-sqs = boto3.client('sqs', region_name=region)
 dynamodb = boto3.client('dynamodb', region_name='us-west-1')
-
-INSTANCE_ID = requests.get('http://169.254.169.254/latest/meta-data/instance-id').text
-QUEUE_URL = os.environ.get("SQS_QUEUE_URL")
 
 # Set up logging to both file and console
 logging.basicConfig(
@@ -39,125 +36,6 @@ def optimize_gpu():
         torch.cuda.set_per_process_memory_fraction(0.9)  # Use 90% of GPU memory
         torch.cuda.empty_cache()
 
-def set_termination_protection(enabled):
-    """
-    Sets termination protection for this EC2 instance.
-    """
-    try:
-        ec2.modify_instance_attribute(
-            InstanceId=INSTANCE_ID,
-            DisableApiTermination={
-                'Value': enabled
-            }
-        )
-        logging.info(f"Set termination protection: {enabled}")
-    except Exception as e:
-        logging.error(f"Failed to set termination protection: {e}")
-
-def poll_queue():
-    """
-    Poll messages from SQS. If no messages are found after a few attempts, shut down.
-    """
-    max_empty_attempts = 3
-    wait_time = 20  # seconds to wait for each poll
-    visibility_timeout = 43200  # 12 hours - maximum allowed by SQS
-
-    for attempt in range(max_empty_attempts):
-        logging.info(f"Polling attempt {attempt + 1}/{max_empty_attempts}")
-        
-        response = sqs.receive_message(
-            QueueUrl=QUEUE_URL,
-            MaxNumberOfMessages=1,
-            WaitTimeSeconds=wait_time,
-            VisibilityTimeout=visibility_timeout,
-            AttributeNames=['All']
-        )
-
-        if 'Messages' in response:
-            for message in response['Messages']:
-                try:
-                    logging.info(f"Processing message: {message['MessageId']}")
-                    set_termination_protection(True)
-                    process_message(message['Body'])
-
-                    # Delete message after successful processing
-                    sqs.delete_message(
-                        QueueUrl=QUEUE_URL,
-                        ReceiptHandle=message['ReceiptHandle']
-                    )
-                    logging.info(f"Successfully processed and deleted message: {message['MessageId']}")
-                except Exception as e:
-                    logging.error(f"Error processing message: {e}")
-                    
-                    # Delete the failed message to prevent infinite retries
-                    try:
-                        sqs.delete_message(
-                            QueueUrl=QUEUE_URL,
-                            ReceiptHandle=message['ReceiptHandle']
-                        )
-                        logging.info(f"Deleted failed message: {message['MessageId']}")
-                    except Exception as delete_error:
-                        logging.error(f"Failed to delete failed message: {delete_error}")
-                        
-                finally:
-                    set_termination_protection(False)
-        else:
-            logging.info(f"No messages found (attempt {attempt + 1}/{max_empty_attempts})")
-            if attempt < max_empty_attempts - 1:
-                logging.info(f"Waiting {wait_time} seconds before next attempt...")
-
-    logging.info("No more messages to process. Shutting down...")
-    shutdown_instance()
-
-def shutdown_instance():
-    """
-    Safely shuts down the EC2 instance after work is done.
-    """
-    logging.info("Shutting down EC2 instance.")
-    try:
-        ec2.terminate_instances(InstanceIds=[INSTANCE_ID])
-        logging.info(f"Successfully initiated termination of instance {INSTANCE_ID}")
-    except Exception as e:
-        logging.error(f"Failed to terminate instance: {e}")
-
-def process_message(message_body):
-    """
-    Process the message and call process_video with extracted parameters.
-    """
-    try:
-        message_data = json.loads(message_body)
-
-        # Log the entire message_data
-        logging.info(f"Received message data: {json.dumps(message_data, indent=4)}")
-        
-        # Set default value for UHD_ENABLED if not present
-        uhd_enabled = message_data.get('UHD_ENABLED', False)
-
-        logging.info(f"UHD_ENABLED: {uhd_enabled}")
-        
-        try:
-            # Add required fields except UHD_ENABLED
-            required_fields = ['S3_BUCKET', 'INPUT_PATH', 'VIDEO_TABLE']
-            
-            # Validate required fields
-            for field in required_fields:
-                if field not in message_data:
-                    raise ValueError(f"Missing required field: {field}")
-            
-            process_video(
-                message_data['S3_BUCKET'],
-                message_data['INPUT_PATH'],
-                message_data['VIDEO_TABLE'],  # Pass VIDEO_TABLE to process_video
-                uhd_enabled,  # Pass UHD_ENABLED to process_video
-                message_data.get('INCLUDE_DOWNLOAD', False)  # Pass INCLUDE_DOWNLOAD to process_video
-            )     
-        except json.JSONDecodeError as e:
-            logging.error(f"Failed to decode message body: {e}")
-            raise
-    except Exception as e:
-        logging.error(f"Error processing message: {e}")
-        raise
-
 def download_from_s3(s3_path):
     bucket = s3_path.split('/')[2]
     key = '/'.join(s3_path.split('/')[3:])
@@ -167,12 +45,25 @@ def download_from_s3(s3_path):
     s3.download_file(bucket, key, local_path)
     return local_path
 
-def upload_to_s3(local_path, s3_path):
-    bucket = s3_path.split('/')[2]
-    key = '/'.join(s3_path.split('/')[3:])
-    
-    s3 = boto3.client('s3')
-    s3.upload_file(local_path, bucket, key)
+_CONTENT_TYPES = {
+    ".m3u8": "application/vnd.apple.mpegurl",
+    ".vtt":  "text/vtt",
+    ".ts":   "video/mp2t"                 # correct MIME for HLS segments
+}
+
+def upload_to_s3(local_path: str, s3_url: str, public: bool = True):
+    bucket, *key_parts = s3_url.replace("s3://", "").split("/")
+    key = "/".join(key_parts)
+
+    # Pick MIME type: explicit map first, then fallback to Python's guess‑table
+    ext = pathlib.Path(local_path).suffix.lower()
+    content_type = _CONTENT_TYPES.get(ext) or mimetypes.guess_type(local_path)[0] \
+                   or "binary/octet-stream"
+
+    extra = {"ContentType": content_type}
+
+    s3 = boto3.client("s3")
+    s3.upload_file(local_path, bucket, key, ExtraArgs=extra)
 
 def get_video_metadata(input_path):
     # Use ffprobe to get video metadata
