@@ -186,9 +186,6 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
         local_input = download_from_s3(input_path)
         update_progress(input_key, 10, video_table)
 
-        # ---- get offset once, from the original video ----
-        offset_ticks = get_mpeg_ts_offset(local_input)
-
         # Get video metadata
         metadata = get_video_metadata(local_input)
 
@@ -247,28 +244,6 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
 
             # Log GPU usage after audio extraction
             log_gpu_usage()
-
-            # Transcribe the audio file
-            transcription_output = f"{work_dir}/{base_name}.json"
-            if os.path.exists(transcription_output) and os.path.getsize(transcription_output) > 0:
-                logging.info(f"Skipping transcription, file already exists: {transcription_output}")
-            else:
-                logging.info("Starting transcription")
-                transcribe_audio(audio_output, transcription_output, offset_ticks)
-
-            try:
-                 # Upload transcription to S3
-                upload_to_s3(transcription_output, transcription_path)
-                # Delete the audio output file after successful upload
-                if os.path.exists(audio_output):
-                    os.remove(audio_output)
-                    os.remove(transcription_output)
-                    logging.info("Deleted audio output file: %s", audio_output)
-            except Exception as e:
-                logging.error("S3 upload failed: %s", e)
-                raise e
-         
-            update_progress(input_key, 20, video_table)
             
             # Define video variants with vbr_hq for good quality and bandwidth
             variants = [
@@ -344,7 +319,6 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
             # Get the frame rate of the input video
             frame_rate = get_frame_rate(local_input)
             keyframe_interval = int(frame_rate * 2)  # 2-second interval
-            playlist_file = os.path.join(work_dir, f"{base_name}.m3u8") # Create the master playlist file
 
             # Create HLS segments and playlists for each variant
             variant_playlists = []
@@ -387,6 +361,33 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
 
             # Log GPU usage after video processing
             log_gpu_usage()
+
+            update_progress(input_key, 70, video_table)
+
+            probe_seg    = f"{work_dir}/{base_name}-360P-H264-000.ts"
+            offset_ticks = get_mpeg_ts_offset(probe_seg)
+
+             # Transcribe the audio file
+            transcription_output = f"{work_dir}/{base_name}.json"
+            if os.path.exists(transcription_output) and os.path.getsize(transcription_output) > 0:
+                logging.info(f"Skipping transcription, file already exists: {transcription_output}")
+            else:
+                logging.info("Starting transcription")
+                transcribe_audio(audio_output, transcription_output, offset_ticks)
+
+            try:
+                 # Upload transcription to S3
+                upload_to_s3(transcription_output, transcription_path)
+                # Delete the audio output file after successful upload
+                if os.path.exists(audio_output):
+                    os.remove(audio_output)
+                    os.remove(transcription_output)
+                    logging.info("Deleted audio output file: %s", audio_output)
+            except Exception as e:
+                logging.error("S3 upload failed: %s", e)
+                raise e
+         
+            update_progress(input_key, 80, video_table)
 
             # Create the master playlist
             master_playlist_file = f"{work_dir}/{base_name}.m3u8"
