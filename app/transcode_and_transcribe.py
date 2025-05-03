@@ -26,20 +26,27 @@ logging.basicConfig(
     ]
 )
 
-def get_mpeg_ts_offset(input_file):
+def get_mpeg_ts_offset(input_file: str) -> int:
     """
-    Return the MPEG‑TS start time in *ticks* (90 000 Hz clock).
+    Return start-PTS in 90 kHz ticks (MPEG-TS clock).
+    If it cannot be detected, fall back to 0.
     """
     cmd = [
-        'ffprobe', '-v', 'error',
-        '-select_streams', 'v:0',
-        '-show_entries', 'packet=pts_time',
-        '-read_intervals', '%+#1',         # read only the first packet
-        '-of', 'json', input_file
+        "ffprobe", "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "packet=pts_time",
+        "-read_intervals", "%+#1",          # first packet only
+        "-of", "json", input_file,
     ]
-    out = subprocess.check_output(cmd, text=True)
-    pts_time = float(json.loads(out)['packets'][0]['pts_time'])
-    return int(round(pts_time * 90000))
+    try:
+        out      = subprocess.check_output(cmd, text=True)
+        packets  = json.loads(out).get("packets", [])
+        pts_time = float(packets[0]["pts_time"]) if packets else 0.0
+    except Exception as exc:
+        logging.warning("Unable to get PTS for %s (%s). Using 0.", input_file, exc)
+        pts_time = 0.0
+
+    return int(round(pts_time * 90_000))
 
 def optimize_gpu():
     if torch.cuda.is_available():
@@ -92,8 +99,10 @@ def get_video_metadata(input_path):
     print("Available metadata:", json.dumps(metadata, indent=2))
     return metadata['streams'][0]
 
-def transcribe_audio(local_file_path, output_file):
-    """Use Whisper to transcribe the audio file."""
+def transcribe_audio(local_file_path: str,
+                     output_file: str,
+                     offset_ticks: int = 0):
+    """Transcribe with Whisper and embed `mpegts_offset`."""
     try:
         logging.info(f"Loading Whisper model and starting transcription for {local_file_path}")
         
@@ -105,15 +114,10 @@ def transcribe_audio(local_file_path, output_file):
         
         # Log GPU usage after loading the model
         log_gpu_usage()
-        
-        # Transcribe the audio
-        result = model.transcribe(local_file_path, word_timestamps=True)
 
-        # Inject the offset
-        offset_ticks = get_mpeg_ts_offset(local_file_path) 
-        result['mpegts_offset'] = offset_ticks
+        result  = model.transcribe(local_file_path, word_timestamps=True)
+        result["mpegts_offset"] = offset_ticks
 
-        # Log GPU usage after transcription
         log_gpu_usage()
 
         # Save the transcription
@@ -182,6 +186,9 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
         local_input = download_from_s3(input_path)
         update_progress(input_key, 10, video_table)
 
+        # ---- get offset once, from the original video ----
+        offset_ticks = get_mpeg_ts_offset(local_input)
+
         # Get video metadata
         metadata = get_video_metadata(local_input)
 
@@ -247,7 +254,7 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
                 logging.info(f"Skipping transcription, file already exists: {transcription_output}")
             else:
                 logging.info("Starting transcription")
-                transcribe_audio(audio_output, transcription_output)
+                transcribe_audio(audio_output, transcription_output, offset_ticks)
 
             try:
                  # Upload transcription to S3
