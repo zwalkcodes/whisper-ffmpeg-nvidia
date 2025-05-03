@@ -26,6 +26,21 @@ logging.basicConfig(
     ]
 )
 
+def get_mpeg_ts_offset(input_file):
+    """
+    Return the MPEG‑TS start time in *ticks* (90 000 Hz clock).
+    """
+    cmd = [
+        'ffprobe', '-v', 'error',
+        '-select_streams', 'v:0',
+        '-show_entries', 'packet=pts_time',
+        '-read_intervals', '%+#1',         # read only the first packet
+        '-of', 'json', input_file
+    ]
+    out = subprocess.check_output(cmd, text=True)
+    pts_time = float(json.loads(out)['packets'][0]['pts_time'])
+    return int(round(pts_time * 90000))
+
 def optimize_gpu():
     if torch.cuda.is_available():
         # Enable TF32 for faster processing on Ampere GPUs
@@ -93,6 +108,10 @@ def transcribe_audio(local_file_path, output_file):
         
         # Transcribe the audio
         result = model.transcribe(local_file_path, word_timestamps=True)
+
+        # Inject the offset
+        offset_ticks = get_mpeg_ts_offset(local_file_path) 
+        result['mpegts_offset'] = offset_ticks
 
         # Log GPU usage after transcription
         log_gpu_usage()
@@ -509,7 +528,7 @@ def create_master_playlist(file_path, variants, m3u8_playlists, frame_rate, base
         ""
     ]
 
-    subtitles = [("English", "en", False), ("Español", "es", False)]
+    subtitles = [("English", "en", True), ("Español", "es", False)]
     target_duration = 3600  # long enough for whole video
 
     for name, lang, is_default in subtitles:
