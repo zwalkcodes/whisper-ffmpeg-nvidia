@@ -68,10 +68,12 @@ def download_from_s3(s3_path):
     return local_path
 
 _CONTENT_TYPES = {
-    ".m3u8": "application/vnd.apple.mpegurl",
-    ".vtt":  "text/vtt",
-    ".ts":   "video/mp2t"                 # correct MIME for HLS segments
-}
+     ".m3u8": "application/vnd.apple.mpegurl",
+     ".vtt":  "text/vtt",
+    ".ts":   "video/mp2t",                # MPEG-TS segments (H.264)
+    ".m4s":  "video/iso.segment",         # CMAF/fMP4 segments (H.265)
+    ".mp4":  "video/mp4"
+ }
 
 def upload_to_s3(local_path: str, s3_url: str, public: bool = True):
     bucket, *key_parts = s3_url.replace("s3://", "").split("/")
@@ -296,6 +298,41 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
                     "segment_duration": 4,
                     "codec": "avc1.64001e",
                     "audio_opts": "-c:a aac -b:a 96k"
+                },
+
+                # ---------- NEW HEVC / H265 fMP4 VARIANTS ----------
+                {
+                    "name": "UHD-H265",
+                    "size": "3840x2160",
+                    "video_codec": "hevc_nvenc",
+                    "video_opts": "-preset slow -rc vbr_hq -b:v 8M  -cq:v 23 -maxrate 10M -bufsize 30M -profile:v main10",
+                    "bitrate": "8M",
+                    "segment_duration": 10,
+                    "codec": "hvc1.2.4.L153.B0",
+                    "audio_opts": "-c:a aac -b:a 256k",
+                    "fmp4": True
+                },
+                {
+                    "name": "1080P-H265",
+                    "size": "1920x1080",
+                    "video_codec": "hevc_nvenc",
+                    "video_opts": "-preset slow -rc vbr_hq -b:v 5M  -cq:v 25 -maxrate 6M -bufsize 20M -profile:v main10",
+                    "bitrate": "5M",
+                    "segment_duration": 8,
+                    "codec": "hvc1.2.4.L123.B0",
+                    "audio_opts": "-c:a aac -b:a 192k",
+                    "fmp4": True
+                },
+                {
+                    "name": "720P-H265",
+                    "size": "1280x720",
+                    "video_codec": "hevc_nvenc",
+                    "video_opts": "-preset slow -rc vbr_hq -b:v 3M  -cq:v 26 -maxrate 4M -bufsize 12M -profile:v main10",
+                    "bitrate": "3M",
+                    "segment_duration": 6,
+                    "codec": "hvc1.2.4.L120.B0",
+                    "audio_opts": "-c:a aac -b:a 128k",
+                    "fmp4": True
                 }
             ]
 
@@ -336,6 +373,12 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
                                   (idx + 1) / total_variants)
                 
                 logging.info(f"Processing variant {idx + 1}/{total_variants}: {variant['name']}")
+                # --- H.264 uses TS, H.265 uses CMAF/fMP4 ---
+                seg_ext  = "m4s" if variant.get("fmp4") else "ts"
+                seg_flag = "-hls_segment_type fmp4 " \
+                           f'-init_seg_name "{base_name}-{variant["name"]}-init.mp4" ' \
+                           if variant.get("fmp4") else ""
+
                 cmd = (
                     f'ffmpeg -y -i {local_input} '
                     f'-c:v {variant["video_codec"]} {variant["video_opts"]} '
@@ -345,8 +388,9 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
                     f'-sc_threshold 40 '
                     f'-f hls '
                     f'-hls_time {variant["segment_duration"]} '
-                    f'-hls_playlist_type vod '
-                    f'-hls_segment_filename "{work_dir}/{base_name}-{variant["name"]}-%03d.ts" '
+                    f'-hls_playlist_type vod ' \
+                    f'{seg_flag}' \
+                    f'-hls_segment_filename "{work_dir}/{base_name}-{variant["name"]}-%03d.{seg_ext}" '
                     f'{variant_playlist}'
                 )
                 try:
@@ -528,10 +572,12 @@ def create_master_playlist(file_path, variants, m3u8_playlists, frame_rate, base
     """
     master_dir = os.path.dirname(file_path) or "."
 
-    # ---------- build master playlist lines ----------
+    # If any variant uses fMP4 (HEVC) bump playlist version to 7 per HLS spec.
+    has_fmp4 = any(v.get("fmp4") for v in variants)
+
     master_lines = [
         "#EXTM3U",
-        "#EXT-X-VERSION:6",
+        f"#EXT-X-VERSION:{7 if has_fmp4 else 6}",
         "#EXT-X-INDEPENDENT-SEGMENTS",
         ""
     ]
