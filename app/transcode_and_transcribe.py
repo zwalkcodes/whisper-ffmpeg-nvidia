@@ -454,7 +454,8 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
 
             # Optional download-friendly 720p MP4 rendition
             if include_download:
-                download_file = f"{work_dir}/{base_name}.mp4"
+                # Encode to a temp file (avoid in-place overwrite) but keep final S3 name
+                download_file = f"{work_dir}/{base_name}-720p.mp4"
                 logging.info("Creating 720P MP4 for download: %s", download_file)
                 dl_cmd = (
                     f'ffmpeg -y -i {local_input} '
@@ -467,7 +468,7 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
                     logging.error("FFmpeg (download) failed:\nOutput: %s\nError: %s", e.output, e.stderr)
                     raise
 
-                logging.info("Uploading 720P MP4 to downloads folder: %s", download_path)
+                logging.info("Uploading 720P MP4 to downloads folder (will overwrite if exists): %s", download_path)
                 upload_to_s3(download_file, download_path)
 
             # Always delete the local input file after processing
