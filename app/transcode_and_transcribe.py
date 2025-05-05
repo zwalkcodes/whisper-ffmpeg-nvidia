@@ -183,9 +183,12 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
         base_name = os.path.splitext(os.path.basename(input_path))[0]
         transcoding_path = f"s3://{s3_bucket}/transcoding_samples/"
         transcription_path = f"s3://{s3_bucket}/transcriptions/{base_name}.json"
-        download_path = f"s3://{s3_bucket}/downloads/{os.path.basename(input_path)}"
+        download_path   = f"s3://{s3_bucket}/downloads/{os.path.basename(input_path)}"
+        originals_path  = f"s3://{s3_bucket}/originals/{os.path.basename(input_path)}"
 
+        # ---------------- obtain source ----------------
         local_input = download_from_s3(input_path)
+
         update_progress(input_key, 10, video_table)
 
         # Get video metadata
@@ -442,11 +445,33 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
             # Send status event: Playlist creation completed
             update_progress(input_key, 90, video_table)
        
-            # Upload to downloads folder if INCLUDE_DOWNLOAD is True
+            # --- Preserve original uploaded file ---
+            logging.info(f"Uploading original to originals folder: {originals_path}")
+            try:
+                upload_to_s3(local_input, originals_path)
+            except Exception as e:
+                logging.warning(f"Failed to copy original to originals/: {e}")
+
+            # Optional download-friendly 720p MP4 rendition
             if include_download:
-                logging.info(f"Uploading local input to downloads folder: {download_path}")
-                upload_to_s3(local_input, download_path)
-            
+                download_file = f"{work_dir}/{base_name}.mp4"
+
+                if not os.path.exists(download_file):
+                    logging.info("Creating 720P MP4 for download: %s", download_file)
+                    dl_cmd = (
+                        f'ffmpeg -y -i {local_input} '
+                        f'-c:v h264_nvenc -preset slow -rc vbr_hq -b:v 4M -vf scale=1280:720 '
+                        f'-c:a aac -b:a 128k {download_file}'
+                    )
+                    try:
+                        subprocess.run(dl_cmd, shell=True, check=True, capture_output=True, text=True)
+                    except subprocess.CalledProcessError as e:
+                        logging.error("FFmpeg (download) failed:\nOutput: %s\nError: %s", e.output, e.stderr)
+                        raise
+
+                logging.info("Uploading 720P MP4 to downloads folder: %s", download_path)
+                upload_to_s3(download_file, download_path)
+
             # Always delete the local input file after processing
             logging.info(f"Deleting local input file: {local_input}")
             os.remove(local_input)
