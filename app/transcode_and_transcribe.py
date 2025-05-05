@@ -358,15 +358,10 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
             keyframe_interval = int(frame_rate * 2)  # 2-second interval
 
             # Create HLS segments and playlists for each variant
-            variant_playlists = []
-            m3u8_playlists = []
             total_variants = len(filtered_variants)
             for idx, variant in enumerate(filtered_variants):
                 variant_playlist = f"{work_dir}/{base_name}-{variant['name']}.m3u8"
-                variant_playlist_m3u8 = f"{base_name}-{variant['name']}.m3u8"
-                variant_playlists.append(variant_playlist)
-                m3u8_playlists.append(variant_playlist_m3u8)
-                
+       
                 # Calculate progress for this variant
                 variant_progress = 20 + \
                                  ((90 - 20) * 
@@ -436,13 +431,13 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
             # Create the master playlist
             master_playlist_file = f"{work_dir}/{base_name}.m3u8"
             non_uhd_variants = [v for v in filtered_variants if "UHD" not in v['name']]
-            create_master_playlist(master_playlist_file, non_uhd_variants, m3u8_playlists, frame_rate, base_name)
+            create_master_playlist(master_playlist_file, non_uhd_variants, frame_rate, base_name)
 
             # Create an additional UHD playlist if UHD_ENABLED is true
             if uhd_enabled:
                 uhd_variants = [v for v in filtered_variants if "UHD" in v['name']]
                 uhd_playlist_file = f"{work_dir}/{base_name}-UHD.m3u8"
-                create_master_playlist(uhd_playlist_file, uhd_variants + non_uhd_variants, m3u8_playlists, frame_rate, base_name)
+                create_master_playlist(uhd_playlist_file, uhd_variants + non_uhd_variants, frame_rate, base_name)
 
             # Send status event: Playlist creation completed
             update_progress(input_key, 90, video_table)
@@ -561,7 +556,7 @@ def update_progress(video_id, percent_complete, table_name, error_message=None):
     except Exception as e:
         logging.error(f"Failed to update progress: {e}")
 
-def create_master_playlist(file_path, variants, m3u8_playlists, frame_rate, base_name):
+def create_master_playlist(file_path, variants, frame_rate, base_name):
     """
     Writes:
       • master playlist  (file_path)
@@ -609,7 +604,9 @@ def create_master_playlist(file_path, variants, m3u8_playlists, frame_rate, base
         )
 
     # ---------- add video variants ----------
-    for variant, variant_playlist_m3u8 in zip(variants, m3u8_playlists):
+    for variant in variants:
+        # Derive the per-variant media playlist name from the variant name
+        variant_playlist = f"{base_name}-{variant['name']}.m3u8"
         bps = int(variant["bitrate"].rstrip("M")) * 1_000_000
         avg = int(bps * 0.8)
         codecs = f'{variant["codec"]},mp4a.40.2'
@@ -620,7 +617,7 @@ def create_master_playlist(file_path, variants, m3u8_playlists, frame_rate, base
             f'FRAME-RATE={frame_rate:.3f},CLOSED-CAPTIONS=NONE,'
             'SUBTITLES="subs"'
         )
-        master_lines.append(variant_playlist_m3u8)
+        master_lines.append(variant_playlist)
 
     # ---------- write master playlist ----------
     with open(file_path, "w") as f:
