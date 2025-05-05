@@ -455,19 +455,17 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
             # Optional download-friendly 720p MP4 rendition
             if include_download:
                 download_file = f"{work_dir}/{base_name}.mp4"
-
-                if not os.path.exists(download_file):
-                    logging.info("Creating 720P MP4 for download: %s", download_file)
-                    dl_cmd = (
-                        f'ffmpeg -y -i {local_input} '
-                        f'-c:v h264_nvenc -preset slow -rc vbr_hq -b:v 4M -vf scale=1280:720 '
-                        f'-c:a aac -b:a 128k {download_file}'
-                    )
-                    try:
-                        subprocess.run(dl_cmd, shell=True, check=True, capture_output=True, text=True)
-                    except subprocess.CalledProcessError as e:
-                        logging.error("FFmpeg (download) failed:\nOutput: %s\nError: %s", e.output, e.stderr)
-                        raise
+                logging.info("Creating 720P MP4 for download: %s", download_file)
+                dl_cmd = (
+                    f'ffmpeg -y -i {local_input} '
+                    f'-c:v h264_nvenc -preset slow -rc vbr_hq -b:v 4M -vf scale=1280:720 '
+                    f'-c:a aac -b:a 128k {download_file}'
+                )
+                try:
+                    subprocess.run(dl_cmd, shell=True, check=True, capture_output=True, text=True)
+                except subprocess.CalledProcessError as e:
+                    logging.error("FFmpeg (download) failed:\nOutput: %s\nError: %s", e.output, e.stderr)
+                    raise
 
                 logging.info("Uploading 720P MP4 to downloads folder: %s", download_path)
                 upload_to_s3(download_file, download_path)
