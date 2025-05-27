@@ -103,10 +103,36 @@ def get_video_metadata(input_path):
 
 def transcribe_audio(local_file_path: str,
                      output_file: str,
-                     offset_ticks: int = 0):
-    """Transcribe with Whisper and embed `mpegts_offset`."""
+                     offset_ticks: int = 0,
+                     language: str = "en",
+                     initial_prompt: str = None,
+                     clip_duration: int = None):
+    """
+    Transcribe with Whisper and embed `mpegts_offset`.
+    
+    Args:
+        local_file_path: Path to the audio file for transcription
+        output_file: Output JSON file path
+        offset_ticks: MPEG-TS clock ticks offset
+        language: Explicitly set language code (e.g., "en")
+        initial_prompt: Optional prompt to guide the transcription
+        clip_duration: If set, only transcribe first N seconds (for testing)
+    """
     try:
         logging.info(f"Loading Whisper model and starting transcription for {local_file_path}")
+        
+        # For testing, if clip_duration is set, create a smaller clip
+        input_file = local_file_path
+        if clip_duration:
+            test_clip = f"{os.path.dirname(local_file_path)}/test_clip_{clip_duration}s.wav"
+            clip_cmd = (
+                f'ffmpeg -y -i {local_file_path} '
+                f'-t {clip_duration} '
+                f'-c:a copy {test_clip}'
+            )
+            subprocess.run(clip_cmd, shell=True, check=True, capture_output=True, text=True)
+            input_file = test_clip
+            logging.info(f"Created {clip_duration}-second test clip for transcription testing")
         
         # Log GPU usage before loading the model
         log_gpu_usage()
@@ -117,7 +143,16 @@ def transcribe_audio(local_file_path: str,
         # Log GPU usage after loading the model
         log_gpu_usage()
 
-        result  = model.transcribe(local_file_path, word_timestamps=True)
+        # Set up transcription options
+        options = {
+            "word_timestamps": True,
+            "language": language,  # Explicitly set the language
+        }
+        
+        if initial_prompt:
+            options["initial_prompt"] = initial_prompt
+            
+        result = model.transcribe(input_file, **options)
         result["mpegts_offset"] = offset_ticks
 
         log_gpu_usage()
@@ -127,9 +162,65 @@ def transcribe_audio(local_file_path: str,
             json.dump(result, f, indent=4)
         logging.info(f"Saved transcription to {output_file}")
 
+        # Clean up test clip if created
+        if clip_duration and os.path.exists(test_clip):
+            os.remove(test_clip)
+
     except Exception as e:
         logging.error(f"Error during transcription: {e}")
         raise
+
+def check_if_vfr(input_file):
+    """Check if the input file has variable frame rate"""
+    cmd = [
+        "ffprobe", "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=avg_frame_rate,r_frame_rate",
+        "-of", "json", input_file,
+    ]
+    try:
+        out = subprocess.check_output(cmd, text=True)
+        data = json.loads(out)
+        
+        if 'streams' not in data or not data['streams']:
+            return False
+        
+        stream = data['streams'][0]
+        avg_frame_rate = stream.get('avg_frame_rate', '0/0')
+        r_frame_rate = stream.get('r_frame_rate', '0/0')
+        
+        # Convert frame rates to float for comparison
+        def rate_to_float(rate_str):
+            if '/' in rate_str:
+                num, denom = map(int, rate_str.split('/'))
+                return num / denom if denom != 0 else 0
+            return float(rate_str) if rate_str.strip() != '0/0' else 0
+        
+        avg_rate = rate_to_float(avg_frame_rate)
+        r_rate = rate_to_float(r_frame_rate)
+        
+        # If rates differ significantly, it's likely VFR
+        return abs(avg_rate - r_rate) > 0.01
+    except Exception as e:
+        logging.warning(f"VFR check failed: {e}. Assuming CFR.")
+        return False
+
+def remux_to_cfr(input_file, output_file):
+    """Re-mux video to a constant frame rate MP4"""
+    cmd = (
+        f'ffmpeg -y -i {input_file} '
+        f'-c:v copy -c:a copy '
+        f'-vsync cfr '
+        f'{output_file}'
+    )
+    try:
+        subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True)
+        logging.info(f"Successfully remuxed to CFR: {output_file}")
+        return True
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Failed to remux to CFR: {e.stderr}")
+        # Fall back to using the original file
+        return False
 
 def get_frame_rate(input_file):
     # Use ffprobe to extract the frame rate
@@ -220,32 +311,61 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
         os.makedirs(work_dir, exist_ok=True)
         
         try:
-            # Check audio fidelity
-            original_bitrate = get_audio_bitrate(local_input)
-            logging.info(f"Original audio bitrate: {original_bitrate} bits per second")
-            audio_bitrate = min(original_bitrate, 256000)  # Use the lower of the original or 256K
-
-            # Process audio separately (high quality)
-            audio_output = f"{work_dir}/{base_name}-WAV.mp4"
-
-            # Check if audio file exists and has content
-            if os.path.exists(audio_output) and os.path.getsize(audio_output) > 0:
-                logging.info(f"Skipping audio extraction, file already exists: {audio_output}")
+            # Check if source has Variable Frame Rate (VFR)
+            is_vfr = check_if_vfr(local_input)
+            if is_vfr:
+                logging.info("Detected Variable Frame Rate (VFR) source. Will re-mux to constant frame rate.")
+                fixed_input = f"{work_dir}/{base_name}-cfr.mp4"
+                remux_to_cfr(local_input, fixed_input)
+                # Use the fixed input for subsequent processing
+                source_file = fixed_input
             else:
-                logging.info(f"Starting audio extraction to: {audio_output}")
+                source_file = local_input
+
+            # Extract audio in optimal format for transcription (PCM 16-bit, 16kHz, mono)
+            audio_output_wav = f"{work_dir}/{base_name}-transcription.wav"
+            
+            # Check if audio file exists and has content
+            if os.path.exists(audio_output_wav) and os.path.getsize(audio_output_wav) > 0:
+                logging.info(f"Skipping audio extraction, file already exists: {audio_output_wav}")
+            else:
+                logging.info(f"Starting audio extraction to: {audio_output_wav}")
                 audio_cmd = (
-                    f'ffmpeg -y -hwaccel cuda -c:v h264_cuvid '
-                    f'-i {local_input} '
-                    f'-vn '
-                    f'-c:a aac -b:a {audio_bitrate} '
-                    f'{audio_output}'
+                    f'ffmpeg -y -i {source_file} '
+                    f'-vn -ac 1 -ar 16000 -sample_fmt s16 '  # Mono, 16kHz, 16-bit PCM
+                    f'-acodec pcm_s16le {audio_output_wav}'
                 )
                 try:
                     subprocess.run(audio_cmd, shell=True, check=True, capture_output=True, text=True)
                 except subprocess.CalledProcessError as e:
                     logging.error(f"FFmpeg command failed:\nOutput: {e.output}\nError: {e.stderr}")
                     raise
-                logging.info("Audio extraction completed")
+                logging.info("Audio extraction for transcription completed")
+
+            # Also extract high-quality audio for streaming (if not already done)
+            audio_output_aac = f"{work_dir}/{base_name}-AAC.mp4"
+            # Check audio fidelity
+            original_bitrate = get_audio_bitrate(source_file)
+            logging.info(f"Original audio bitrate: {original_bitrate} bits per second")
+            audio_bitrate = min(original_bitrate, 256000)  # Use the lower of the original or 256K
+            
+            if os.path.exists(audio_output_aac) and os.path.getsize(audio_output_aac) > 0:
+                logging.info(f"Skipping AAC audio extraction, file already exists: {audio_output_aac}")
+            else:
+                logging.info(f"Starting AAC audio extraction to: {audio_output_aac}")
+                aac_cmd = (
+                    f'ffmpeg -y -hwaccel cuda -c:v h264_cuvid '
+                    f'-i {source_file} '
+                    f'-vn '
+                    f'-c:a aac -b:a {audio_bitrate} '
+                    f'{audio_output_aac}'
+                )
+                try:
+                    subprocess.run(aac_cmd, shell=True, check=True, capture_output=True, text=True)
+                except subprocess.CalledProcessError as e:
+                    logging.error(f"FFmpeg command failed:\nOutput: {e.output}\nError: {e.stderr}")
+                    raise
+                logging.info("AAC audio extraction completed")
 
             # Log GPU usage after audio extraction
             log_gpu_usage()
@@ -357,7 +477,7 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
                 filtered_variants = [v for v in filtered_variants if "UHD" not in v['name']]
 
             # Get the frame rate of the input video
-            frame_rate = get_frame_rate(local_input)
+            frame_rate = get_frame_rate(source_file)
             keyframe_interval = int(frame_rate * 2)  # 2-second interval
 
             # Create HLS segments and playlists for each variant
@@ -378,7 +498,7 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
                            if variant.get("fmp4") else ""
 
                 cmd = (
-                    f'ffmpeg -y -i {local_input} '
+                    f'ffmpeg -y -i {source_file} '
                     f'-c:v {variant["video_codec"]} {variant["video_opts"]} '
                     f'-vf scale={variant["size"].replace("x", ":")} '
                     f'{variant["audio_opts"]} '
@@ -415,32 +535,58 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
                 logging.info(f"Skipping transcription, file already exists: {transcription_output}")
             else:
                 logging.info("Starting transcription")
-                transcribe_audio(audio_output, transcription_output, offset_ticks)
+                # Use the WAV file optimized for transcription
+                transcribe_audio(audio_output_wav, transcription_output, offset_ticks)
 
             try:
                  # Upload transcription to S3
                 upload_to_s3(transcription_output, transcription_path)
-                # Delete the audio output file after successful upload
-                if os.path.exists(audio_output):
-                    os.remove(audio_output)
+                # Delete the audio output files after successful upload
+                if os.path.exists(audio_output_wav):
+                    os.remove(audio_output_wav)
+                if os.path.exists(audio_output_aac):
+                    os.remove(audio_output_aac)
+                if os.path.exists(transcription_output):
                     os.remove(transcription_output)
-                    logging.info("Deleted audio output file: %s", audio_output)
+                logging.info("Deleted audio output files")
             except Exception as e:
                 logging.error("S3 upload failed: %s", e)
                 raise e
          
             update_progress(input_key, 80, video_table)
 
-            # Create the master playlist
+            # Separate H.264 and H.265 variants for playlist creation
+            h264_variants = [v for v in filtered_variants if "H264" in v['name']]
+            h265_variants = [v for v in filtered_variants if "H265" in v['name']]
+            
+            # BACKWARD COMPATIBILITY: Main playlist remains H.264 only (same as before)
             master_playlist_file = f"{work_dir}/{base_name}.m3u8"
-            non_uhd_variants = [v for v in filtered_variants if "UHD" not in v['name']]
-            create_master_playlist(master_playlist_file, non_uhd_variants, frame_rate, base_name)
-
-            # Create an additional UHD playlist if UHD_ENABLED is true
+            non_uhd_h264_variants = [v for v in h264_variants if "UHD" not in v['name']]
+            create_master_playlist(master_playlist_file, non_uhd_h264_variants, frame_rate, base_name, hls_version=6)
+            
+            # Create H.265 playlist for newer devices
+            if h265_variants:
+                h265_playlist_file = f"{work_dir}/{base_name}-hevc.m3u8"
+                non_uhd_h265_variants = [v for v in h265_variants if "UHD" not in v['name']]
+                create_master_playlist(h265_playlist_file, non_uhd_h265_variants, frame_rate, base_name, hls_version=7)
+            
+            # Create combined modern playlist with both codecs for auto-switching
+            modern_playlist_file = f"{work_dir}/{base_name}-auto.m3u8"
+            combined_non_uhd = [v for v in filtered_variants if "UHD" not in v['name']]
+            create_master_playlist(modern_playlist_file, combined_non_uhd, frame_rate, base_name)
+            
+            # Create UHD playlists if enabled
             if uhd_enabled:
-                uhd_variants = [v for v in filtered_variants if "UHD" in v['name']]
-                uhd_playlist_file = f"{work_dir}/{base_name}-UHD.m3u8"
-                create_master_playlist(uhd_playlist_file, uhd_variants + non_uhd_variants, frame_rate, base_name)
+                # H.264 UHD playlist
+                uhd_h264_playlist_file = f"{work_dir}/{base_name}-UHD.m3u8"
+                uhd_h264_variants = [v for v in h264_variants if "UHD" in v['name']] + non_uhd_h264_variants
+                create_master_playlist(uhd_h264_playlist_file, uhd_h264_variants, frame_rate, base_name, hls_version=6)
+                
+                # H.265 UHD playlist (if variants exist)
+                if h265_variants:
+                    uhd_h265_playlist_file = f"{work_dir}/{base_name}-UHD-hevc.m3u8"
+                    uhd_h265_variants = [v for v in h265_variants if "UHD" in v['name']] + non_uhd_h265_variants
+                    create_master_playlist(uhd_h265_playlist_file, uhd_h265_variants, frame_rate, base_name, hls_version=7)
 
             # Send status event: Playlist creation completed
             update_progress(input_key, 90, video_table)
@@ -458,7 +604,7 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
                 download_file = f"{work_dir}/{base_name}-720p.mp4"
                 logging.info("Creating 720P MP4 for download: %s", download_file)
                 dl_cmd = (
-                    f'ffmpeg -y -i {local_input} '
+                    f'ffmpeg -y -i {source_file} '
                     f'-c:v h264_nvenc -preset slow -rc vbr_hq -b:v 4M -vf scale=1280:720 '
                     f'-c:a aac -b:a 128k {download_file}'
                 )
@@ -474,6 +620,11 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
             # Always delete the local input file after processing
             logging.info(f"Deleting local input file: {local_input}")
             os.remove(local_input)
+            
+            # Remove the fixed CFR file if it was created
+            if is_vfr and os.path.exists(fixed_input):
+                logging.info(f"Deleting fixed CFR file: {fixed_input}")
+                os.remove(fixed_input)
 
             # Upload all segments and manifests to S3
             for root, _, files in os.walk(work_dir):
@@ -502,6 +653,94 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
         update_progress(input_key, 0, video_table, error_message=error_message)
         logging.error(f"Failed to process video {input_key}: {e}")
         raise
+
+def create_master_playlist(file_path, variants, frame_rate, base_name, hls_version=None):
+    """
+    Writes:
+      • master playlist  (file_path)
+      • {base_name}_{lang}.m3u8 subtitle playlists (same dir as master)
+
+    Args:
+        file_path: Path to write the master playlist
+        variants: List of variant dictionaries
+        frame_rate: Frame rate of the video
+        base_name: Base name for file paths
+        hls_version: Explicit HLS version to use (if None, will be determined automatically)
+    
+    Assumes the WebVTT files live at ../subtitles/{base_name}_{lang}.vtt
+    relative to the master playlist.
+    """
+    master_dir = os.path.dirname(file_path) or "."
+
+    # If any variant uses fMP4 (HEVC) bump playlist version to 7 per HLS spec.
+    has_fmp4 = any(v.get("fmp4") for v in variants)
+    
+    # Allow overriding HLS version explicitly
+    version = hls_version if hls_version is not None else (7 if has_fmp4 else 6)
+
+    master_lines = [
+        "#EXTM3U",
+        f"#EXT-X-VERSION:{version}",
+        "#EXT-X-INDEPENDENT-SEGMENTS",
+        ""
+    ]
+
+    subtitles = [("English", "en", True), ("Español", "es", False)]
+    target_duration = 3600  # long enough for whole video
+
+    for name, lang, is_default in subtitles:
+        default_flag = "YES" if is_default else "NO"
+        vtt_path     = f"../subtitles/{base_name}_{lang}.vtt"
+        sub_m3u8     = f"{base_name}_{lang}.m3u8"
+        sub_m3u8_path = os.path.join(master_dir, sub_m3u8)
+
+        # ---- write subtitle playlist (.m3u8) ----
+        with open(sub_m3u8_path, "w") as sf:
+            sf.write("#EXTM3U\n")
+            sf.write("#EXT-X-VERSION:6\n")
+            sf.write(f"#EXT-X-TARGETDURATION:{target_duration}\n")
+            sf.write(f'#EXT-X-MAP:URI="{vtt_path}"\n')
+            sf.write(f"#EXTINF:{target_duration:.3f},\n")
+            sf.write(f"{vtt_path}\n")
+            sf.write("#EXT-X-ENDLIST\n")
+
+        # ---- add track reference to master ----
+        master_lines.append(
+            f'#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",'
+            f'NAME="{name}",LANGUAGE="{lang}",DEFAULT={default_flag},'
+            f'AUTOSELECT=YES,FORCED=NO,URI="{sub_m3u8}"'
+        )
+
+    # ---------- add video variants ----------
+    for variant in variants:
+        # Derive the per-variant media playlist name from the variant name
+        variant_playlist = f"{base_name}-{variant['name']}.m3u8"
+        bps = int(variant["bitrate"].rstrip("M")) * 1_000_000
+        avg = int(bps * 0.8)
+        codecs = f'{variant["codec"]},mp4a.40.2'
+
+        master_lines.append(
+            f'#EXT-X-STREAM-INF:BANDWIDTH={bps},AVERAGE-BANDWIDTH={avg},'
+            f'RESOLUTION={variant["size"]},CODECS="{codecs}",'
+            f'FRAME-RATE={frame_rate:.3f},CLOSED-CAPTIONS=NONE,'
+            'SUBTITLES="subs"'
+        )
+        master_lines.append(variant_playlist)
+
+    # ---------- write master playlist ----------
+    with open(file_path, "w") as f:
+        f.write("\n".join(master_lines))
+        f.write("\n")
+
+def str2bool(val):
+    return str(val).lower() in ("yes", "true", "1")
+
+def log_gpu_usage():
+    try:
+        result = subprocess.run('nvidia-smi', shell=True, capture_output=True, text=True)
+        logging.info(f"GPU Usage:\n{result.stdout}")
+    except Exception as e:
+        logging.error(f"Failed to get GPU usage: {e}")
 
 def update_progress(video_id, percent_complete, table_name, error_message=None):
     """
@@ -579,84 +818,6 @@ def update_progress(video_id, percent_complete, table_name, error_message=None):
             
     except Exception as e:
         logging.error(f"Failed to update progress: {e}")
-
-def create_master_playlist(file_path, variants, frame_rate, base_name):
-    """
-    Writes:
-      • master playlist  (file_path)
-      • {base_name}_{lang}.m3u8 subtitle playlists (same dir as master)
-
-    Assumes the WebVTT files live at ../subtitles/{base_name}_{lang}.vtt
-    relative to the master playlist.
-    """
-    master_dir = os.path.dirname(file_path) or "."
-
-    # If any variant uses fMP4 (HEVC) bump playlist version to 7 per HLS spec.
-    has_fmp4 = any(v.get("fmp4") for v in variants)
-
-    master_lines = [
-        "#EXTM3U",
-        f"#EXT-X-VERSION:{7 if has_fmp4 else 6}",
-        "#EXT-X-INDEPENDENT-SEGMENTS",
-        ""
-    ]
-
-    subtitles = [("English", "en", True), ("Español", "es", False)]
-    target_duration = 3600  # long enough for whole video
-
-    for name, lang, is_default in subtitles:
-        default_flag = "YES" if is_default else "NO"
-        vtt_path     = f"../subtitles/{base_name}_{lang}.vtt"
-        sub_m3u8     = f"{base_name}_{lang}.m3u8"
-        sub_m3u8_path = os.path.join(master_dir, sub_m3u8)
-
-        # ---- write subtitle playlist (.m3u8) ----
-        with open(sub_m3u8_path, "w") as sf:
-            sf.write("#EXTM3U\n")
-            sf.write("#EXT-X-VERSION:6\n")
-            sf.write(f"#EXT-X-TARGETDURATION:{target_duration}\n")
-            sf.write(f'#EXT-X-MAP:URI="{vtt_path}"\n')
-            sf.write(f"#EXTINF:{target_duration:.3f},\n")
-            sf.write(f"{vtt_path}\n")
-            sf.write("#EXT-X-ENDLIST\n")
-
-        # ---- add track reference to master ----
-        master_lines.append(
-            f'#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",'
-            f'NAME="{name}",LANGUAGE="{lang}",DEFAULT={default_flag},'
-            f'AUTOSELECT=YES,FORCED=NO,URI="{sub_m3u8}"'
-        )
-
-    # ---------- add video variants ----------
-    for variant in variants:
-        # Derive the per-variant media playlist name from the variant name
-        variant_playlist = f"{base_name}-{variant['name']}.m3u8"
-        bps = int(variant["bitrate"].rstrip("M")) * 1_000_000
-        avg = int(bps * 0.8)
-        codecs = f'{variant["codec"]},mp4a.40.2'
-
-        master_lines.append(
-            f'#EXT-X-STREAM-INF:BANDWIDTH={bps},AVERAGE-BANDWIDTH={avg},'
-            f'RESOLUTION={variant["size"]},CODECS="{codecs}",'
-            f'FRAME-RATE={frame_rate:.3f},CLOSED-CAPTIONS=NONE,'
-            'SUBTITLES="subs"'
-        )
-        master_lines.append(variant_playlist)
-
-    # ---------- write master playlist ----------
-    with open(file_path, "w") as f:
-        f.write("\n".join(master_lines))
-        f.write("\n")
-
-def str2bool(val):
-    return str(val).lower() in ("yes", "true", "1")
-
-def log_gpu_usage():
-    try:
-        result = subprocess.run('nvidia-smi', shell=True, capture_output=True, text=True)
-        logging.info(f"GPU Usage:\n{result.stdout}")
-    except Exception as e:
-        logging.error(f"Failed to get GPU usage: {e}")
 
 if __name__ == "__main__":
     optimize_gpu()
