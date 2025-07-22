@@ -206,12 +206,10 @@ def check_if_vfr(input_file):
         return False
 
 def remux_to_cfr(input_file, output_file):
-    """Re-mux video to a constant frame rate MP4"""
     cmd = (
         f'ffmpeg -y -i {input_file} '
-        f'-c:v copy -c:a copy '
-        f'-vsync cfr '
-        f'{output_file}'
+        f'-vf fps=fps=30 -c:v h264_nvenc -preset fast '
+        f'-vsync cfr -c:a copy {output_file}'
     )
     try:
         subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True)
@@ -295,9 +293,14 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
         target_ratio = 16 / 9
         
         if abs(actual_ratio - target_ratio) > 0.01:
-            raise ValueError(f"Input video is not in 16:9 aspect ratio.")
-        
-        print(f"Aspect ratio check passed: {width}x{height} = {actual_ratio:.3f} ≈ 16:9")
+            warning_message = f"WARNING: Input video is not in 16:9 aspect ratio ({width}x{height} = {actual_ratio:.3f}). Will add pillar boxing/letter boxing as needed."
+            logging.warning(warning_message)
+            print(warning_message)
+            # Save warning to database but continue processing
+            update_progress(input_key, 10, video_table, error_message=warning_message)
+            # Continue processing instead of raising an error
+        else:
+            print(f"Aspect ratio check passed: {width}x{height} = {actual_ratio:.3f} ≈ 16:9")
 
         # Check if resolution is too small
         min_width, min_height = 1920, 1080  # Minimum resolution for 1080p
@@ -478,7 +481,7 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
 
             # Get the frame rate of the input video
             frame_rate = get_frame_rate(source_file)
-            keyframe_interval = int(frame_rate * 2)  # 2-second interval
+            # keyframe_interval = int(frame_rate * 2)  # 2-second interval
 
             # Create HLS segments and playlists for each variant
             total_variants = len(filtered_variants)
@@ -497,14 +500,23 @@ def process_video(s3_bucket, input_path, video_table, uhd_enabled, include_downl
                            f'-init_seg_name "{base_name}-{variant["name"]}-init.mp4" ' \
                            if variant.get("fmp4") else ""
 
+                seg_len = variant['segment_duration']          # 4, 6, 8 or 10
+                keyint  = int(frame_rate * seg_len)            # 30 fps → 120/180/240/300
+
+                hls_flags = 'independent_segments'
+                if variant.get("fmp4"):
+                    hls_flags += '+split_by_time'              # needed for fMP4/CMAF
+                    hls_flags += '+program_date_time'
+
                 cmd = (
-                    f'ffmpeg -y -i {source_file} '
+                    f'ffmpeg -y -avoid_negative_ts make_zero -start_at_zero -i {source_file} '
                     f'-c:v {variant["video_codec"]} {variant["video_opts"]} '
                     f'-vf scale={variant["size"].replace("x", ":")} '
                     f'{variant["audio_opts"]} '
-                    f'-g {keyframe_interval} -keyint_min {keyframe_interval} '
-                    f'-sc_threshold 40 '
-                    f'-f hls '
+                    f'-g {keyint} -keyint_min {keyint} '
+                    f'-sc_threshold 0 '                            # disable scene-cut I-frames
+                    f'-force_key_frames "expr:gte(t,n_forced*{seg_len})" '  # key-frame EXACTLY every seg_len
+                    f'-hls_flags {hls_flags} '
                     f'-hls_time {variant["segment_duration"]} '
                     f'-hls_playlist_type vod ' \
                     f'{seg_flag}' \
